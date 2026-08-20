@@ -76,6 +76,7 @@ pub struct TerminalKey {
     pub kind: crossterm::event::KeyEventKind,
     pub repeat_count: u16,
     pub shifted_codepoint: Option<u32>,
+    pub base_layout_codepoint: Option<u32>,
     pub generated_text: Option<String>,
     physical_identity_hint: bool,
     windows_shift_dead_key: bool,
@@ -90,6 +91,7 @@ impl TerminalKey {
             kind: crossterm::event::KeyEventKind::Press,
             repeat_count: 1,
             shifted_codepoint: None,
+            base_layout_codepoint: None,
             generated_text: None,
             physical_identity_hint: false,
             windows_shift_dead_key: false,
@@ -122,6 +124,11 @@ impl TerminalKey {
 
     pub fn with_shifted_codepoint(mut self, shifted_codepoint: u32) -> Self {
         self.shifted_codepoint = Some(shifted_codepoint);
+        self
+    }
+
+    pub fn with_base_layout_codepoint(mut self, base_layout_codepoint: u32) -> Self {
+        self.base_layout_codepoint = Some(base_layout_codepoint);
         self
     }
 
