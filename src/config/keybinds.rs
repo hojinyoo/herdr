@@ -1322,7 +1322,28 @@ pub fn key_event_matches_combo(key: &KeyEvent, combo: KeyCombo) -> bool {
 }
 
 pub fn terminal_key_matches_combo(key: &TerminalKey, combo: KeyCombo) -> bool {
-    key_parts_match_combo(key.code, key.modifiers, key.shifted_codepoint, combo)
+    key_parts_match_combo(
+        physical_key_code(key),
+        key.modifiers,
+        key.shifted_codepoint,
+        combo,
+    )
+}
+
+/// Same rule as the control-byte branch of `encode_legacy_inner`: a chord
+/// carrying CONTROL generates no text, so the physical key is what the typist
+/// aimed at, and only then is the reported character worth overriding. Without
+/// the CONTROL gate an unmodified AZERTY `é` matches `prefix+2` and a German
+/// `ü` matches `prefix+[`. Non-ASCII alone is not the discriminator, or Dvorak
+/// would match by key position instead of the letter typed.
+fn physical_key_code(key: &TerminalKey) -> KeyCode {
+    match key.code {
+        KeyCode::Char(ch) if !ch.is_ascii() && key.modifiers.contains(KeyModifiers::CONTROL) => key
+            .base_layout_codepoint
+            .and_then(char::from_u32)
+            .map_or(key.code, KeyCode::Char),
+        _ => key.code,
+    }
 }
 
 fn key_parts_match_combo(
@@ -1665,10 +1686,24 @@ close_tab = "X"
 
     #[test]
     fn unicode_prefix_bindings_match_non_us_keys() {
-        for ch in ['ğ', 'ç', 'ş', 'ı', 'é', 'ø'] {
+        // With REPORT_ALTERNATE_KEYS the host also sends the US key under the
+        // one bound, so the alternate must not displace the bound character.
+        for (ch, base) in [
+            ('ğ', '['),
+            ('ç', ','),
+            ('ş', ';'),
+            ('ı', 'i'),
+            ('é', '2'),
+            ('ø', ';'),
+        ] {
             let bindings = ActionKeybinds::prefix(&ch.to_string());
-            assert!(bindings
-                .matches_prefix_key(&TerminalKey::new(KeyCode::Char(ch), KeyModifiers::empty(),)));
+            assert!(
+                bindings.matches_prefix_key(
+                    &TerminalKey::new(KeyCode::Char(ch), KeyModifiers::empty())
+                        .with_base_layout_codepoint(base as u32)
+                ),
+                "{ch}"
+            );
         }
     }
 
@@ -1774,6 +1809,84 @@ close_tab = "X"
         assert!(bang.matches_prefix_key(
             &TerminalKey::new(KeyCode::Char('1'), KeyModifiers::SHIFT)
                 .with_shifted_codepoint('!' as u32)
+        ));
+    }
+
+    #[test]
+    fn non_latin_layout_matches_bindings_by_physical_key() {
+        let ctrl_b = TerminalKey::new(KeyCode::Char('\u{3160}'), KeyModifiers::CONTROL);
+        let combo = (KeyCode::Char('b'), KeyModifiers::CONTROL);
+        assert!(terminal_key_matches_combo(
+            &ctrl_b.clone().with_base_layout_codepoint('b' as u32),
+            combo
+        ));
+        assert!(!terminal_key_matches_combo(&ctrl_b, combo));
+    }
+
+    #[test]
+    fn non_ascii_layouts_reach_the_prefix_from_a_reported_sequence() {
+        // Codepoints are real characters of each script; only the base-layout
+        // subfield (98 = `b`) decides the match.
+        for (script, sequence) in [
+            ("jamo", "\x1b[12640::98;5u"),
+            ("kana", "\x1b[12371::98;5u"),
+            ("zhuyin", "\x1b[12566::98;5u"),
+            ("cyrillic", "\x1b[1080::98;5u"),
+        ] {
+            let key =
+                crate::input::parse_terminal_key_sequence(sequence).expect("kitty sequence parses");
+            assert!(
+                terminal_key_matches_combo(&key, (KeyCode::Char('b'), KeyModifiers::CONTROL)),
+                "{script}"
+            );
+        }
+    }
+
+    #[test]
+    fn unmodified_latin1_letters_do_not_fire_default_prefix_commands() {
+        let kb = Config::default().keybinds();
+        // AZERTY 2-key and German QWERTZ [-key, as kitty reports them with
+        // REPORT_ALTERNATE_KEYS: the layout letter plus the US base-layout key.
+        let azerty_e = crate::input::parse_terminal_key_sequence("\x1b[233::50;1u")
+            .expect("kitty sequence parses");
+        let german_u = crate::input::parse_terminal_key_sequence("\x1b[252::91;1u")
+            .expect("kitty sequence parses");
+
+        assert!(kb
+            .switch_tab
+            .iter()
+            .all(|binding| binding.matched_index(&azerty_e).is_none()));
+        assert!(!kb.copy_mode.matches_prefix_key(&german_u));
+    }
+
+    #[test]
+    fn configured_unicode_prefix_matches_the_sequence_a_host_reports() {
+        // `ö` sits on the US `;` key; the reported alternate must not win.
+        let config: Config = toml::from_str(
+            r#"
+[keys]
+prefix = "ö"
+"#,
+        )
+        .expect("config parses");
+        let key = crate::input::parse_terminal_key_sequence("\x1b[246::59;1u")
+            .expect("kitty sequence parses");
+
+        assert!(terminal_key_matches_combo(&key, config.prefix_key()));
+    }
+
+    #[test]
+    fn latin_layout_remap_matches_the_typed_letter_not_the_key_position() {
+        // Dvorak's physical `p` types `r`, and the user means ctrl+r.
+        let key = TerminalKey::new(KeyCode::Char('r'), KeyModifiers::CONTROL)
+            .with_base_layout_codepoint('p' as u32);
+        assert!(terminal_key_matches_combo(
+            &key,
+            (KeyCode::Char('r'), KeyModifiers::CONTROL)
+        ));
+        assert!(!terminal_key_matches_combo(
+            &key,
+            (KeyCode::Char('p'), KeyModifiers::CONTROL)
         ));
     }
 

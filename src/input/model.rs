@@ -72,6 +72,7 @@ pub struct TerminalKey {
     pub kind: crossterm::event::KeyEventKind,
     pub repeat_count: u16,
     pub shifted_codepoint: Option<u32>,
+    pub base_layout_codepoint: Option<u32>,
     pub generated_text: Option<String>,
     source: KeySource,
 }
@@ -84,6 +85,7 @@ impl TerminalKey {
             kind: crossterm::event::KeyEventKind::Press,
             repeat_count: 1,
             shifted_codepoint: None,
+            base_layout_codepoint: None,
             generated_text: None,
             source: KeySource::Synthesized,
         }
@@ -115,6 +117,11 @@ impl TerminalKey {
     #[allow(dead_code)] // Reserved for the upcoming raw input parser to preserve shifted/base key pairs.
     pub fn with_shifted_codepoint(mut self, shifted_codepoint: u32) -> Self {
         self.shifted_codepoint = Some(shifted_codepoint);
+        self
+    }
+
+    pub fn with_base_layout_codepoint(mut self, base_layout_codepoint: u32) -> Self {
+        self.base_layout_codepoint = Some(base_layout_codepoint);
         self
     }
 

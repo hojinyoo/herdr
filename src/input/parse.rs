@@ -34,7 +34,9 @@ fn parse_kitty_key_sequence(data: &str) -> Option<TerminalKey> {
     let codepoint = key_fields.next()?.parse::<u32>().ok()?;
     let shifted_codepoint = key_fields
         .next()
-        .filter(|field| !field.is_empty())
+        .and_then(|field| field.parse::<u32>().ok());
+    let base_layout_codepoint = key_fields
+        .next()
         .and_then(|field| field.parse::<u32>().ok());
 
     let code = kitty_codepoint_to_keycode(codepoint)?;
@@ -52,6 +54,10 @@ fn parse_kitty_key_sequence(data: &str) -> Option<TerminalKey> {
     let mut key = TerminalKey::new(code, modifiers).with_kind(kind);
     if let Some(shifted_codepoint) = shifted_codepoint {
         key = key.with_shifted_codepoint(shifted_codepoint);
+    }
+    // Unlike the shifted alternate above, this one implies nothing about Shift.
+    if let Some(base_layout_codepoint) = base_layout_codepoint {
+        key = key.with_base_layout_codepoint(base_layout_codepoint);
     }
     Some(key.with_generated_text(associated_text))
 }
@@ -654,6 +660,43 @@ mod tests {
             let key = parse_terminal_key_sequence(sequence).unwrap();
             assert_eq!(key.code, KeyCode::Char('r'));
             assert_eq!(key.modifiers, KeyModifiers::empty());
+        }
+
+        // An empty shifted subfield must not swallow the base-layout one.
+        let key = parse_terminal_key_sequence("\x1b[114::113;1u").unwrap();
+        assert_eq!(key.shifted_codepoint, None);
+        assert_eq!(key.base_layout_codepoint, Some('q' as u32));
+    }
+
+    // The CONTROL assert also pins that a base-layout alternate never implies Shift.
+    #[test]
+    fn parse_kitty_sequence_preserves_the_base_layout_alternate() {
+        for (sequence, codepoint, base) in [
+            ("\x1b[12628::112;5u", '\u{3154}', Some('p' as u32)),
+            ("\x1b[12636::110;5u", '\u{315c}', Some('n' as u32)),
+            ("\x1b[12640::98;5u", '\u{3160}', Some('b' as u32)),
+            ("\x1b[12628;5u", '\u{3154}', None),
+            // Associated text parses ahead of the alternates; it must not eat them.
+            ("\x1b[12640::98;5;12640u", '\u{3160}', Some('b' as u32)),
+        ] {
+            let key = parse_terminal_key_sequence(sequence).unwrap();
+            assert_eq!(key.code, KeyCode::Char(codepoint));
+            assert_eq!(key.modifiers, KeyModifiers::CONTROL);
+            assert_eq!(key.base_layout_codepoint, base, "{sequence}");
+        }
+    }
+
+    // An alternate herdr cannot use is worth less than the keystroke carrying it.
+    #[test]
+    fn unusable_kitty_alternates_do_not_drop_the_key() {
+        for sequence in [
+            "\x1b[12628::55296;5u",  // lone surrogate: not a scalar value
+            "\x1b[12628::abc;5u",    // non-numeric
+            "\x1b[12628::112:99;5u", // subfield the spec does not define
+        ] {
+            let key = parse_terminal_key_sequence(sequence).expect(sequence);
+            assert_eq!(key.code, KeyCode::Char('\u{3154}'), "{sequence}");
+            assert!(!key.modifiers.contains(KeyModifiers::SHIFT), "{sequence}");
         }
     }
 
