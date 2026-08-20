@@ -50,6 +50,36 @@ pub(crate) fn validate_agent_view_source(source: &str) -> Result<String, String>
     normalize_source(source)
 }
 
+/// Source used when the Agents panel control cycles into the built-in attention filter.
+/// Distinct from plugin-owned views (`plugin:…`) so a click can clear without claiming a plugin id.
+pub(crate) const UI_ATTENTION_VIEW_SOURCE: &str = "ui.agent_panel";
+
+/// Transient attention-only projection installed by clicking the Agents panel control.
+/// Matches the filter/sort shape `hwt attn` installs (blocked + done, attention-first).
+pub(crate) fn ui_attention_view() -> AgentViewSetParams {
+    AgentViewSetParams {
+        source: UI_ATTENTION_VIEW_SOURCE.to_string(),
+        label: Some("attn".to_string()),
+        filter: Some(AgentViewFilter::In {
+            field: AgentViewField::Builtin(AgentViewBuiltinField::Status),
+            values: vec![
+                AgentViewValue::String("blocked".to_string()),
+                AgentViewValue::String("done".to_string()),
+            ],
+        }),
+        sort: vec![
+            AgentViewSort {
+                field: AgentViewSortField::Builtin(AgentViewBuiltinSortField::Attention),
+                order: AgentViewSortOrder::Desc,
+            },
+            AgentViewSort {
+                field: AgentViewSortField::Builtin(AgentViewBuiltinSortField::StateChangeSeq),
+                order: AgentViewSortOrder::Desc,
+            },
+        ],
+    }
+}
+
 pub(crate) fn apply_agent_view(app: &AppState, entries: &mut Vec<AgentPanelEntry>) {
     if let Some(spec) = app.agent_view_override.as_ref() {
         if let Some(filter) = &spec.filter {
