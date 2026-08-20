@@ -153,13 +153,17 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN_VERSION }}
           targets: ${{ matrix.target }}
 
-      - name: Install Zig
-        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
-        with:
-          version: 0.15.2
+      # Upstream Zig 0.15.2 cannot link libghostty-vt against the macOS SDK here
+      # (undefined _abort, _free, __availability_version_check ...). release.yml
+      # uses the patched Homebrew formula on macOS for the same reason.
+      - name: Install patched Zig on macOS
+        run: |
+          HOMEBREW_NO_AUTO_UPDATE=1 brew install zig@0.15
+          echo "$(brew --prefix zig@0.15)/bin" >> "$GITHUB_PATH"
+          "$(brew --prefix zig@0.15)/bin/zig" version
 
       - name: Install macOS build tools
-        run: brew install cmake ninja
+        run: HOMEBREW_NO_AUTO_UPDATE=1 brew install cmake ninja
 
       - name: Remove Zig caches
         run: rm -rf .zig-cache vendor/libghostty-vt/.zig-cache vendor/libghostty-vt/zig-out
