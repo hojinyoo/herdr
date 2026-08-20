@@ -601,10 +601,28 @@ impl AppState {
                     }
 
                     if self.on_agent_panel_sort_toggle(mouse.column, mouse.row) {
-                        self.agent_panel_sort = match self.agent_panel_sort {
-                            AgentPanelSort::Spaces => AgentPanelSort::Priority,
-                            AgentPanelSort::Priority => AgentPanelSort::Spaces,
-                        };
+                        // grouped → priority → attn → grouped. `attn` is a transient view
+                        // rather than a persisted sort, so only the panel's own stop closes
+                        // the cycle back to grouped; dismissing a view installed from
+                        // elsewhere must leave the user's persisted sort untouched.
+                        match self.agent_view_override.take() {
+                            Some(view)
+                                if view.source
+                                    == crate::app::agent_view::UI_ATTENTION_VIEW_SOURCE =>
+                            {
+                                self.agent_panel_sort = AgentPanelSort::Spaces;
+                            }
+                            Some(_) => {}
+                            None => match self.agent_panel_sort {
+                                AgentPanelSort::Spaces => {
+                                    self.agent_panel_sort = AgentPanelSort::Priority;
+                                }
+                                AgentPanelSort::Priority => {
+                                    self.agent_view_override =
+                                        Some(crate::app::agent_view::ui_attention_view());
+                                }
+                            },
+                        }
                         self.agent_panel_scroll = 0;
                         self.mark_session_dirty();
                         return None;
