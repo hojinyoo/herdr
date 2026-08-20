@@ -466,7 +466,7 @@ impl AppState {
     }
 
     pub(super) fn on_agent_panel_sort_toggle(&self, col: u16, row: u16) -> bool {
-        if self.sidebar_collapsed || self.agent_view_override.is_some() {
+        if self.sidebar_collapsed {
             return false;
         }
 
@@ -474,7 +474,8 @@ impl AppState {
             self.view.sidebar_rect,
             self.sidebar_section_split,
         );
-        let rect = crate::ui::agent_panel_toggle_rect(detail_area, self.agent_panel_sort);
+        // Size the hit target to the drawn label — including an active view label like `attn`.
+        let rect = crate::ui::agent_panel_control_toggle_rect(detail_area, self);
         rect.width > 0
             && col >= rect.x
             && col < rect.x + rect.width
@@ -844,7 +845,12 @@ mod tests {
     }
 
     #[test]
-    fn clicking_agent_panel_toggle_switches_sort() {
+    fn clicking_agent_panel_toggle_cycles_grouped_priority_attn() {
+        use crate::api::schema::{
+            AgentViewBuiltinField, AgentViewBuiltinSortField, AgentViewField, AgentViewFilter,
+            AgentViewSort, AgentViewSortField, AgentViewSortOrder, AgentViewValue,
+        };
+
         let mut app = app_for_mouse_test();
         app.state.workspaces = vec![Workspace::test_new("test")];
         app.state.active = Some(0);
@@ -852,19 +858,141 @@ mod tests {
         app.state.mode = Mode::Terminal;
         app.state.agent_panel_scroll = 3;
 
+        let click_toggle = |app: &mut crate::app::App| {
+            let (_, detail_area) = crate::ui::expanded_sidebar_sections(
+                app.state.view.sidebar_rect,
+                app.state.sidebar_section_split,
+            );
+            let toggle = crate::ui::agent_panel_control_toggle_rect(detail_area, &app.state);
+            app.handle_mouse(mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                toggle.x,
+                toggle.y,
+            ));
+        };
+
+        // grouped → priority
+        click_toggle(&mut app);
+        assert_eq!(app.state.agent_panel_sort, AgentPanelSort::Priority);
+        assert!(app.state.agent_view_override.is_none());
+        assert_eq!(app.state.agent_panel_scroll, 0);
+
+        // priority → attn
+        app.state.agent_panel_scroll = 2;
+        click_toggle(&mut app);
+        assert_eq!(app.state.agent_panel_sort, AgentPanelSort::Priority);
+        let view = app
+            .state
+            .agent_view_override
+            .as_ref()
+            .expect("attn view installed");
+        assert_eq!(view.source, "ui.agent_panel");
+        assert_eq!(view.label.as_deref(), Some("attn"));
+        assert_eq!(
+            view.filter,
+            Some(AgentViewFilter::In {
+                field: AgentViewField::Builtin(AgentViewBuiltinField::Status),
+                values: vec![
+                    AgentViewValue::String("blocked".to_string()),
+                    AgentViewValue::String("done".to_string()),
+                ],
+            })
+        );
+        assert_eq!(
+            view.sort,
+            vec![
+                AgentViewSort {
+                    field: AgentViewSortField::Builtin(AgentViewBuiltinSortField::Attention),
+                    order: AgentViewSortOrder::Desc,
+                },
+                AgentViewSort {
+                    field: AgentViewSortField::Builtin(AgentViewBuiltinSortField::StateChangeSeq),
+                    order: AgentViewSortOrder::Desc,
+                },
+            ]
+        );
+        assert_eq!(app.state.agent_panel_scroll, 0);
+
+        // attn → grouped
+        click_toggle(&mut app);
+        assert_eq!(app.state.agent_panel_sort, AgentPanelSort::Spaces);
+        assert!(app.state.agent_view_override.is_none());
+    }
+
+    #[test]
+    fn clicking_attn_label_clears_plugin_agent_view() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("test")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.agent_panel_sort = AgentPanelSort::Priority;
+        app.state.agent_view_override = Some(crate::api::schema::AgentViewSetParams {
+            source: "plugin:hwt".to_string(),
+            label: Some("attn".to_string()),
+            filter: None,
+            sort: Vec::new(),
+        });
+
         let (_, detail_area) = crate::ui::expanded_sidebar_sections(
             app.state.view.sidebar_rect,
             app.state.sidebar_section_split,
         );
-        let toggle = crate::ui::agent_panel_toggle_rect(detail_area, app.state.agent_panel_sort);
+        let toggle = crate::ui::agent_panel_control_toggle_rect(detail_area, &app.state);
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
             toggle.x,
             toggle.y,
         ));
 
+        assert!(app.state.agent_view_override.is_none());
         assert_eq!(app.state.agent_panel_sort, AgentPanelSort::Priority);
-        assert_eq!(app.state.agent_panel_scroll, 0);
+    }
+
+    #[test]
+    fn dismissing_plugin_agent_view_keeps_persisted_sort() {
+        let _guard = crate::config::test_config_env_lock().lock().unwrap();
+        let dir = unique_temp_path("dismiss-plugin-view-sort");
+        let path = dir.join("config.toml");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&path, "[ui]\nagent_panel_sort = \"priority\"\n").unwrap();
+        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
+
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("test")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.agent_panel_sort = AgentPanelSort::Priority;
+        app.state.agent_view_override = Some(crate::api::schema::AgentViewSetParams {
+            source: "plugin:hwt".to_string(),
+            label: Some("attn".to_string()),
+            filter: None,
+            sort: Vec::new(),
+        });
+
+        let (_, detail_area) = crate::ui::expanded_sidebar_sections(
+            app.state.view.sidebar_rect,
+            app.state.sidebar_section_split,
+        );
+        let toggle = crate::ui::agent_panel_control_toggle_rect(detail_area, &app.state);
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            toggle.x,
+            toggle.y,
+        ));
+
+        // Read and clean up before asserting so a failure cannot leak the shared config env.
+        let content = std::fs::read_to_string(&path).unwrap();
+        std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(
+            content.contains("agent_panel_sort = \"priority\""),
+            "dismissing a plugin view rewrote the persisted sort: {content}"
+        );
+        assert!(app.state.agent_view_override.is_none());
+        assert_eq!(app.state.agent_panel_sort, AgentPanelSort::Priority);
     }
 
     #[test]
