@@ -220,7 +220,7 @@ fn try_encode_csi_u(key: &TerminalKey, flags: u16) -> Option<Vec<u8>> {
 
     let (codepoint, alternate_shifted) = match key.code {
         KeyCode::Char(c) => {
-            let base = canonical_kitty_char(c, mods);
+            let base = canonical_kitty_char(ctrl_chord_char(key, c).unwrap_or(c), mods);
             let shifted = alternate_shifted_codepoint(key, flags);
             (base as u32, shifted)
         }
@@ -439,6 +439,22 @@ fn is_shifted_ascii_punctuation(ch: char) -> bool {
     )
 }
 
+/// The character a CONTROL chord is really about. Such a chord generates no
+/// text, so a non-ASCII reported character is incidental and the physical key
+/// is what the typist aimed at. Only non-ASCII consults the alternate, or
+/// Dvorak's physical `p` would send ctrl+p when the typist meant the ctrl+r
+/// they saw. None means the alternate is missing or unusable, leaving the
+/// reported character as the only thing left to send.
+fn ctrl_chord_char(key: &TerminalKey, ch: char) -> Option<char> {
+    if !key.modifiers.contains(KeyModifiers::CONTROL) {
+        return None;
+    }
+    if ch.is_ascii() {
+        return Some(ch);
+    }
+    key.base_layout_codepoint.and_then(char::from_u32)
+}
+
 fn canonical_kitty_char(ch: char, mods: KeyModifiers) -> char {
     if mods.contains(KeyModifiers::SHIFT) && ch.is_ascii_uppercase() {
         ch.to_ascii_lowercase()
@@ -498,17 +514,8 @@ fn legacy_ctrl_byte(ch: char) -> Option<u8> {
 fn encode_legacy_inner(key: TerminalKey) -> Vec<u8> {
     match key.code {
         KeyCode::Char(ch) => {
-            if key.modifiers.contains(KeyModifiers::CONTROL) {
-                // Only non-ASCII consults the base layout, or Dvorak's physical
-                // `p` would send ctrl+p when the typist meant the ctrl+r they saw.
-                let ctrl_source = if ch.is_ascii() {
-                    Some(ch)
-                } else {
-                    key.base_layout_codepoint.and_then(char::from_u32)
-                };
-                if let Some(byte) = ctrl_source.and_then(legacy_ctrl_byte) {
-                    return vec![byte];
-                }
+            if let Some(byte) = ctrl_chord_char(&key, ch).and_then(legacy_ctrl_byte) {
+                return vec![byte];
             }
 
             let ch = if key.modifiers == KeyModifiers::SHIFT {
@@ -681,15 +688,58 @@ mod tests {
     }
 
     #[test]
-    fn kitty_panes_still_receive_the_whole_codepoint() {
-        for (flags, expected) in [(1u16, "\x1b[12628;5u"), (7, "\x1b[12628;5:1u")] {
-            let key = parse_terminal_key_sequence("\x1b[12628::112;5u").expect("sequence parses");
+    fn kitty_panes_receive_the_base_layout_key_for_ctrl_chords() {
+        // ctrl+a and ctrl+c on Korean 2-set, captured from hardware: herdr sent
+        // the bare jamo and Claude Code printed it as text (herdrdev/herdr#2363
+        // reports the same table). That pane negotiates flags 1, so it would
+        // never read a third subfield; the physical key has to ride in the
+        // primary field.
+        for (sequence, flags, expected) in [
+            ("\x1b[12609::97;5u", 1u16, "\x1b[97;5u"),
+            ("\x1b[12618::99;5u", 1, "\x1b[99;5u"),
+            ("\x1b[12609::97;5u", 7, "\x1b[97;5:1u"),
+            ("\x1b[12628::112;5u", 1, "\x1b[112;5u"),
+            ("\x1b[12636::110;5u", 1, "\x1b[110;5u"),
+        ] {
+            let key = parse_terminal_key_sequence(sequence).expect("sequence parses");
             assert_eq!(
                 encode_terminal_key(key, KeyboardProtocol::Kitty { flags }),
                 expected.as_bytes(),
-                "flags {flags}"
+                "{sequence} flags {flags}"
             );
         }
+    }
+
+    #[test]
+    fn kitty_panes_keep_the_reported_char_without_ctrl() {
+        // Mirror of the keybind gate: an unmodified layout letter is text the
+        // typist produced, so the alternate must not displace it. Flags 9 adds
+        // REPORT_ALL_KEYS, which routes even unmodified keys through CSI u.
+        for (sequence, flags, expected) in [
+            ("\x1b[233::50;1u", 1u16, "é"),
+            ("\x1b[233::50;1u", 9, "\x1b[233;1u"),
+            ("\x1b[12609::97;1u", 1, "\u{3141}"),
+            ("\x1b[12609::97;1u", 9, "\x1b[12609;1u"),
+            ("\x1b[12618::99;1u", 1, "\u{314a}"),
+            ("\x1b[12618::99;1u", 9, "\x1b[12618;1u"),
+        ] {
+            let key = parse_terminal_key_sequence(sequence).expect("sequence parses");
+            assert_eq!(
+                encode_terminal_key(key, KeyboardProtocol::Kitty { flags }),
+                expected.as_bytes(),
+                "{sequence} flags {flags}"
+            );
+        }
+    }
+
+    #[test]
+    fn kitty_ctrl_chords_keep_ascii_layout_letters_by_position_free_rule() {
+        // Dvorak: the physical `p` types `r`, and the user means ctrl+r.
+        let key = parse_terminal_key_sequence("\x1b[114::112;5u").expect("sequence parses");
+        assert_eq!(
+            encode_terminal_key(key, KeyboardProtocol::Kitty { flags: 1 }),
+            b"\x1b[114;5u"
+        );
     }
 
     fn assert_terminal_key_eq(
