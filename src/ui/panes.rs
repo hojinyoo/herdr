@@ -22,6 +22,8 @@ pub(crate) fn pane_is_scrolled_back(rt: &TerminalRuntime) -> bool {
         .is_some_and(|metrics| metrics.offset_from_bottom > 0)
 }
 
+const TRANSFER_BORDER_LABEL: &str = "file transfer";
+
 fn pane_border_title(label: &str, pane_width: u16, _focused: bool) -> Option<String> {
     let label = label.trim();
     if label.is_empty() || pane_width <= 4 {
@@ -656,17 +658,26 @@ fn render_pane_border_titles(
     pane_infos: &[PaneInfo],
     frame: &mut Frame,
 ) {
+    // Read once rather than per pane: this loop is pane-scaled.
+    let transferring_pane = crate::transfer::gate().active_pane();
     let buf = frame.buffer_mut();
     let area = buf.area;
     for info in pane_infos {
         if !info.borders.contains(Borders::TOP) || info.rect.width <= 4 {
             continue;
         }
-        let Some(title) = ws
-            .pane_state(info.id)
-            .and_then(|pane| app.terminals.get(&pane.attached_terminal_id))
-            .and_then(|terminal| terminal.border_label(app.show_agent_labels_on_pane_borders))
-            .and_then(|label| pane_border_title(&label, info.rect.width, info.is_focused))
+        // A pane relaying a file transfer stops emulating, so its content is
+        // frozen. Say why, or it reads as a hung pane to everyone but the
+        // client running the transfer.
+        let label = if transferring_pane == Some(info.id.raw()) {
+            Some(TRANSFER_BORDER_LABEL.to_owned())
+        } else {
+            ws.pane_state(info.id)
+                .and_then(|pane| app.terminals.get(&pane.attached_terminal_id))
+                .and_then(|terminal| terminal.border_label(app.show_agent_labels_on_pane_borders))
+        };
+        let Some(title) =
+            label.and_then(|label| pane_border_title(&label, info.rect.width, info.is_focused))
         else {
             continue;
         };

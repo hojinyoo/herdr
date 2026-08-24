@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 // ---------------------------------------------------------------------------
 
 /// Current protocol version. Bumped when wire format changes incompatibly.
-pub const PROTOCOL_VERSION: u32 = 20;
+pub const PROTOCOL_VERSION: u32 = 21;
 
 /// Maximum allowed frame payload size (2 MB). Frames larger than this are
 /// rejected to prevent denial-of-service via oversized length prefixes.
@@ -753,6 +753,16 @@ pub enum ServerMessage {
 
     /// Suppress a direct command that expired before terminal delivery.
     GraphicsTransmissionRetired { transfer_id: u64, image_id: u32 },
+
+    /// Whether this client is relaying a raw file transfer for a pane.
+    ///
+    /// While active the client must forward stdin verbatim and interpret
+    /// nothing: the bytes belong to the trzsz protocol, and any escape the
+    /// client writes to its own stdout lands in the middle of the transfer.
+    TransferPassthrough {
+        /// True on entry to passthrough, false when the transfer ends.
+        active: bool,
+    },
 }
 
 // ---------------------------------------------------------------------------

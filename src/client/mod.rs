@@ -98,6 +98,10 @@ struct ClientState {
     repaint_pending: bool,
     /// Whether this client draws the cursor into frame cells instead of using the host cursor.
     draw_host_cursor: bool,
+    /// Whether this client is relaying a raw file transfer. While set, stdin is
+    /// forwarded verbatim: the bytes belong to the transfer protocol, and any
+    /// escape this client writes to its own stdout corrupts the stream.
+    transfer_passthrough: bool,
 }
 
 #[derive(Debug, Default)]
@@ -1410,6 +1414,7 @@ async fn run_client_loop(
         redraw_on_focus_gained: config.redraw_on_focus_gained,
         repaint_pending: false,
         draw_host_cursor,
+        transfer_passthrough: false,
     };
     debug!(?negotiated_encoding, "client render encoding active");
     let host_mouse_capture_active = Arc::new(AtomicBool::new(state.mouse_capture_active));
@@ -1521,7 +1526,9 @@ async fn run_client_loop(
         match event {
             #[cfg(unix)]
             ClientLoopEvent::StdinInput(data) => {
-                let data = if let Some(attach_escape) = &mut state.attach_escape {
+                let data = if state.transfer_passthrough {
+                    data
+                } else if let Some(attach_escape) = &mut state.attach_escape {
                     match attach_escape.filter_input(
                         data,
                         state.reported_size.1,
@@ -1574,11 +1581,13 @@ async fn run_client_loop(
                     }
                     data
                 };
-                if should_bridge_clipboard_image_paste(
-                    &data,
-                    is_remote_client,
-                    state.remote_image_paste_key,
-                ) {
+                if !state.transfer_passthrough
+                    && should_bridge_clipboard_image_paste(
+                        &data,
+                        is_remote_client,
+                        state.remote_image_paste_key,
+                    )
+                {
                     if let Some(image) = crate::platform::read_clipboard_image() {
                         write_remote_image_to_server(&mut write_stream, image, "clipboard paste")?;
                         continue;
@@ -1587,9 +1596,12 @@ async fn run_client_loop(
                         "clipboard image paste trigger received, but local clipboard has no image"
                     );
                 }
-                if let Some(image) = read_image_file_from_terminal_drop(&data, is_remote_client) {
-                    write_remote_image_to_server(&mut write_stream, image, "file drop")?;
-                    continue;
+                if !state.transfer_passthrough {
+                    if let Some(image) = read_image_file_from_terminal_drop(&data, is_remote_client)
+                    {
+                        write_remote_image_to_server(&mut write_stream, image, "file drop")?;
+                        continue;
+                    }
                 }
                 let msg = ClientMessage::Input { data };
                 if let Err(e) = write_to_server(&mut write_stream, &msg) {
@@ -1701,12 +1713,39 @@ async fn run_client_loop(
                     state.repaint_pending = false;
                 }
                 ServerMessage::Terminal(frame) => {
-                    if state.kitty_graphics_enabled && contains_kitty_graphics_bytes(&frame.bytes) {
+                    if !state.transfer_passthrough
+                        && state.kitty_graphics_enabled
+                        && contains_kitty_graphics_bytes(&frame.bytes)
+                    {
                         record_received_kitty_graphics(&frame.bytes);
                     }
                     let mut stdout = io::stdout();
                     let _ = stdout.write_all(&frame.bytes);
                     let _ = stdout.flush();
+                }
+                ServerMessage::TransferPassthrough { active } => {
+                    // The host terminal emits mouse motion, focus, and paste
+                    // framing on its own schedule. Once stdin is forwarded
+                    // verbatim those bytes are indistinguishable from transfer
+                    // payload, so silence the terminal for the duration instead
+                    // of trying to pick them back out downstream. This runs
+                    // before the flag is set, so it still reaches the host
+                    // ahead of the trigger that starts the transfer.
+                    let mut stdout = io::stdout();
+                    if active {
+                        let _ = crate::terminal_modes::clear_host_mouse_reporting(&mut stdout);
+                        let _ = execute!(stdout, DisableFocusChange, DisableBracketedPaste);
+                    } else {
+                        let _ = set_mouse_capture(
+                            state.mouse_capture_active,
+                            host_sgr_pixels_active.load(Ordering::Acquire),
+                        );
+                        let _ = execute!(stdout, EnableBracketedPaste, EnableFocusChange);
+                    }
+                    state.transfer_passthrough = active;
+                    if !active {
+                        state.request_repaint();
+                    }
                 }
                 ServerMessage::Graphics { bytes } => {
                     if state.kitty_graphics_enabled {

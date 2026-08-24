@@ -289,8 +289,12 @@ pub(crate) fn render_targets(
     clients: &HashMap<u64, ClientConnection>,
     foreground_client_id: Option<u64>,
 ) -> Vec<RenderTarget> {
+    // A client relaying a file transfer must receive nothing but the raw pane
+    // bytes; a rendered frame written to its stdout would be read as protocol.
+    let transfer_owner = crate::transfer::gate().owner_client();
     let mut targets: Vec<RenderTarget> = clients
         .iter()
+        .filter(|(client_id, _)| transfer_owner != Some(**client_id))
         .filter(|(_, client)| {
             client.writer.is_some()
                 && (client.is_full_app_client()

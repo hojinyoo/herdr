@@ -258,7 +258,7 @@ pub enum ShellModeConfig {
     NonLogin,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(default)]
 pub struct TerminalConfig {
     /// Executable used for new interactive panes. Empty means SHELL, then /bin/sh.
@@ -267,6 +267,23 @@ pub struct TerminalConfig {
     pub shell_mode: ShellModeConfig,
     /// CWD policy for new interactive panes, tabs, and workspaces.
     pub new_cwd: NewTerminalCwdConfig,
+    /// Let `trz` / `tsz` file transfers run through a pane by handing the pane's
+    /// raw bytes to the attached client for the duration. Default: true.
+    ///
+    /// Disabling it restores the pre-support behaviour: the trzsz trigger is
+    /// rendered as ordinary text and transfers do not start.
+    pub file_transfer: bool,
+}
+
+impl Default for TerminalConfig {
+    fn default() -> Self {
+        Self {
+            default_shell: String::new(),
+            shell_mode: ShellModeConfig::default(),
+            new_cwd: NewTerminalCwdConfig::default(),
+            file_transfer: true,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]

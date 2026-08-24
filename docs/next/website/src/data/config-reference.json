@@ -206,6 +206,12 @@
             "current",
             "path"
           ]
+        },
+        {
+          "key": "terminal.file_transfer",
+          "type": "boolean",
+          "default": "true",
+          "description": "Let trz / tsz file transfers run through a pane by handing the pane's raw bytes to the attached client for the duration. Disable to render the trzsz trigger as ordinary text instead."
         }
       ]
     },

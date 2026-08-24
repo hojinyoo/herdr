@@ -1930,6 +1930,15 @@ impl PaneRuntime {
             let rt = tokio::runtime::Handle::current();
             let delay_rt = rt.clone();
             let on_read = Box::new(move |bytes: &[u8]| {
+                let bytes = match crate::transfer::gate().on_pane_output(pane_id.raw(), bytes) {
+                    crate::transfer::PaneOutput::Consumed => {
+                        return PtyReadResult {
+                            terminal_responses: Vec::new(),
+                        }
+                    }
+                    crate::transfer::PaneOutput::EmulatePrefix(prefix) => &bytes[..prefix],
+                    crate::transfer::PaneOutput::Emulate => bytes,
+                };
                 content_seq.fetch_add(1, Ordering::AcqRel);
                 let shell_pid = child_pid.load(Ordering::Acquire);
                 let result =
@@ -2099,6 +2108,15 @@ impl PaneRuntime {
             let reported_cwd = reported_cwd.clone();
             let rt = tokio::runtime::Handle::current();
             let on_read = Box::new(move |bytes: &[u8]| {
+                let bytes = match crate::transfer::gate().on_pane_output(pane_id.raw(), bytes) {
+                    crate::transfer::PaneOutput::Consumed => {
+                        return PtyReadResult {
+                            terminal_responses: Vec::new(),
+                        }
+                    }
+                    crate::transfer::PaneOutput::EmulatePrefix(prefix) => &bytes[..prefix],
+                    crate::transfer::PaneOutput::Emulate => bytes,
+                };
                 content_seq.fetch_add(1, Ordering::AcqRel);
                 let shell_pid = child_pid.load(Ordering::Acquire);
                 let result =
@@ -2613,6 +2631,12 @@ impl PaneRuntime {
         if self.current_size.get() == size {
             return;
         }
+        // A SIGWINCH mid-transfer makes the child redraw into a stream that has
+        // to stay byte-exact. `current_size` is left stale on purpose so the
+        // next render pass reapplies the real geometry once the transfer ends.
+        if self.transfer_owns_pty() {
+            return;
+        }
         self.current_size.set(size);
         let terminal_responses = self
             .terminal
@@ -2833,15 +2857,40 @@ impl PaneRuntime {
             .encode_terminal_key(key, self.keyboard_protocol())
     }
 
+    /// True while a file transfer owns this pane's PTY. Every writer other than
+    /// the owning client would inject bytes into the middle of the transfer
+    /// protocol, so they are all refused here rather than at each call site.
+    fn transfer_owns_pty(&self) -> bool {
+        crate::transfer::gate().write_blocked(self.pane_id.raw())
+    }
+
     pub async fn send_bytes(&self, bytes: Bytes) -> Result<(), mpsc::error::SendError<Bytes>> {
+        if self.transfer_owns_pty() {
+            return Err(mpsc::error::SendError(bytes));
+        }
         self.io.send_bytes(bytes).await
     }
 
     pub fn try_send_bytes(&self, bytes: Bytes) -> Result<(), mpsc::error::TrySendError<Bytes>> {
+        if self.transfer_owns_pty() {
+            return Err(mpsc::error::TrySendError::Full(bytes));
+        }
+        self.io.try_send_bytes(bytes)
+    }
+
+    /// Writes bytes that belong to the running file transfer, bypassing the
+    /// guard in [`Self::try_send_bytes`].
+    pub fn write_transfer_bytes(
+        &self,
+        bytes: Bytes,
+    ) -> Result<(), mpsc::error::TrySendError<Bytes>> {
         self.io.try_send_bytes(bytes)
     }
 
     pub fn send_bytes_after(&self, bytes: Bytes, delay: std::time::Duration) {
+        if self.transfer_owns_pty() {
+            return;
+        }
         self.io.send_bytes_after(bytes, delay);
     }
 
@@ -3090,6 +3139,58 @@ impl PaneRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The gate is process-global; nextest gives every test its own process.
+    #[tokio::test]
+    async fn a_pane_in_a_file_transfer_refuses_every_other_writer() {
+        const PANE: u32 = 31;
+        let (mut runtime, mut rx) =
+            PaneRuntime::test_with_channel_and_scrollback_bytes(80, 24, 4096, b"", 4);
+        runtime.pane_id = PaneId::from_raw(PANE);
+
+        assert!(runtime.try_send_bytes(Bytes::from_static(b"ls\r")).is_ok());
+        assert_eq!(rx.try_recv().ok(), Some(Bytes::from_static(b"ls\r")));
+
+        crate::transfer::gate().test_take_pane(PANE);
+
+        assert!(
+            runtime.try_send_bytes(Bytes::from_static(b"ls\r")).is_err(),
+            "keybindings, mouse, and `herdr pane input` must not reach a transferring pane"
+        );
+        assert!(runtime
+            .send_bytes(Bytes::from_static(b"ls\r"))
+            .await
+            .is_err());
+        assert!(rx.try_recv().is_err());
+
+        assert!(
+            runtime
+                .write_transfer_bytes(Bytes::from_static(b"#ACT:eyJ9\n"))
+                .is_ok(),
+            "the transfer's own bytes still have to reach the PTY"
+        );
+        assert_eq!(rx.try_recv().ok(), Some(Bytes::from_static(b"#ACT:eyJ9\n")));
+    }
+
+    #[tokio::test]
+    async fn a_pane_in_a_file_transfer_defers_resize() {
+        const PANE: u32 = 32;
+        let (mut runtime, _rx) =
+            PaneRuntime::test_with_channel_and_scrollback_bytes(80, 24, 4096, b"", 4);
+        runtime.pane_id = PaneId::from_raw(PANE);
+        crate::transfer::gate().test_take_pane(PANE);
+
+        runtime.resize(40, 100, 0, 0);
+        assert_eq!(
+            runtime.current_size.get(),
+            (24, 80, 0, 0),
+            "the stale size is what makes the next render pass retry the resize"
+        );
+
+        crate::transfer::gate().test_release_pane();
+        runtime.resize(40, 100, 0, 0);
+        assert_eq!(runtime.current_size.get(), (40, 100, 0, 0));
+    }
 
     #[test]
     fn pane_launch_env_removes_outer_codex_thread_id() {

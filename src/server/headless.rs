@@ -340,6 +340,12 @@ pub struct HeadlessServer {
     server_event_rx: mpsc::Receiver<ServerEvent>,
     /// Sender for server events (cloned for each client thread).
     server_event_tx: mpsc::Sender<ServerEvent>,
+    /// Last `(client, pane)` pushed to the file-transfer gate. Cached so the
+    /// per-loop sync costs a comparison instead of a lock.
+    transfer_candidate: (u64, u32),
+    /// Pane the gate reported as transferring on the previous loop pass, so the
+    /// end of a session is noticed wherever it happened.
+    transfer_active_pane: Option<u32>,
 }
 
 fn apply_terminal_attach_scroll(
@@ -529,6 +535,8 @@ impl HeadlessServer {
             should_quit,
             server_event_rx,
             server_event_tx,
+            transfer_candidate: (0, 0),
+            transfer_active_pane: None,
         })
     }
 
@@ -695,6 +703,7 @@ impl HeadlessServer {
             }
 
             self.drain_client_config_reload_request();
+            self.sync_transfer_state();
             self.sync_immediate_pty_sources();
             self.stream_host_mouse_capture_mode();
             self.stream_host_keyboard_enhancement_flags();
@@ -1594,6 +1603,9 @@ impl HeadlessServer {
     }
 
     fn remove_client(&mut self, client_id: u64) -> bool {
+        if let Some(ended) = crate::transfer::gate().end_for_client(client_id) {
+            self.resume_after_transfer(crate::layout::PaneId::from_raw(ended.pane));
+        }
         self.retire_direct_graphics_for_client(client_id);
         let was_foreground = self.foreground_client_id == Some(client_id);
         self.app.clear_input_source(client_id);
@@ -1777,6 +1789,86 @@ impl HeadlessServer {
             .keys()
             .find(|id| id.to_string() == terminal_id)
             .cloned()
+    }
+
+    /// Restores ordinary rendering after passthrough.
+    ///
+    /// The owner's host terminal was written to directly, so its incremental
+    /// frame baseline is stale and only a full repaint can be trusted. The pane
+    /// itself is marked dirty so the child's own cursor-restore lands on screen.
+    fn resume_after_transfer(&mut self, pane_id: crate::layout::PaneId) {
+        self.transfer_candidate = (0, 0);
+        for client in self.clients.values_mut() {
+            client.request_repaint();
+        }
+        self.app.render_dirty.request_pty(pane_id);
+        self.app.render_dirty.request_generic();
+    }
+
+    /// Pane that raw client keystrokes currently reach, and so the only pane
+    /// allowed to start a file transfer.
+    fn transfer_eligible_pane(&self) -> Option<crate::layout::PaneId> {
+        if let Some(popup) = self.app.state.popup_pane.as_ref() {
+            return Some(popup.pane_id);
+        }
+        let ws_idx = self.app.state.active?;
+        self.app.state.workspaces.get(ws_idx)?.focused_pane_id()
+    }
+
+    /// One loop step for file transfers: expire the bounded escapes, notice a
+    /// session that ended, and pre-arm the gate for the next one.
+    ///
+    /// Polling rather than eventing matters here. The loop is guaranteed to tick
+    /// every `CLIENT_ACCEPT_POLL_INTERVAL`, whereas a silent false trigger
+    /// produces no event at all and a dropped event would leave a hung pane.
+    fn sync_transfer_state(&mut self) {
+        let gate = crate::transfer::gate();
+        gate.check_timeouts();
+        match (self.transfer_active_pane, gate.active_pane()) {
+            (Some(pane), None) => {
+                self.transfer_active_pane = None;
+                self.resume_after_transfer(crate::layout::PaneId::from_raw(pane));
+            }
+            (_, active) => self.transfer_active_pane = active,
+        }
+        if !gate.is_enabled() {
+            return;
+        }
+        let pane = self
+            .transfer_eligible_pane()
+            .map_or(0, crate::layout::PaneId::raw);
+        let client_id = self
+            .foreground_client_id
+            .filter(|client_id| {
+                self.clients
+                    .get(client_id)
+                    .is_some_and(|client| client.is_full_app_client() && client.writer.is_some())
+            })
+            .unwrap_or(0);
+        if self.transfer_candidate == (client_id, pane) {
+            return;
+        }
+        self.transfer_candidate = (client_id, pane);
+        let owner = (pane != 0)
+            .then(|| self.clients.get(&client_id))
+            .flatten()
+            .and_then(|client| client.writer.as_ref())
+            .map(|writer| (client_id, writer.control.clone()));
+        gate.set_candidate(Some(pane), owner);
+    }
+
+    fn write_transfer_input(&self, pane: u32, data: Vec<u8>) {
+        let pane_id = crate::layout::PaneId::from_raw(pane);
+        let Some(runtime) = self
+            .terminal_id_for_pane(pane_id)
+            .and_then(|terminal_id| self.app.terminal_runtimes.get(terminal_id))
+        else {
+            warn!(pane, "file transfer input has no live pane runtime");
+            return;
+        };
+        if let Err(err) = runtime.write_transfer_bytes(Bytes::from(data)) {
+            warn!(pane, err = %err, "failed to write file transfer input");
+        }
     }
 
     fn runtime_for_terminal_id_string(
@@ -2567,6 +2659,9 @@ impl HeadlessServer {
             }
             AppEvent::PaneDied { pane_id } => {
                 let pane_id_val = *pane_id;
+                if let Some(ended) = crate::transfer::gate().end_for_pane(pane_id_val.raw()) {
+                    self.resume_after_transfer(crate::layout::PaneId::from_raw(ended.pane));
+                }
                 let terminal_id = self.app.state.workspaces.iter().find_map(|ws| {
                     ws.tabs.iter().find_map(|tab| {
                         tab.panes
@@ -2715,6 +2810,14 @@ impl HeadlessServer {
     /// Sends a message to a specific client. Returns false if the client
     /// was not found or the send failed (client removed).
     fn send_to_client(&mut self, client_id: u64, msg: ServerMessage) -> bool {
+        // The trzsz client upstream swallows everything it reads once a
+        // transfer starts, so anything Herdr writes to this client's stdout
+        // lands inside the protocol stream as junk.
+        if crate::transfer::gate().owner_client() == Some(client_id)
+            && !matches!(msg, ServerMessage::ServerShutdown { .. })
+        {
+            return true;
+        }
         let serialized = match Self::frame_server_message(&msg) {
             Ok(framed) => framed,
             Err(err) => {
@@ -3148,6 +3251,12 @@ impl HeadlessServer {
                     self.clients.get(&client_id).map(|client| &client.mode),
                     Some(ClientConnectionMode::TerminalObserve { .. })
                 ) {
+                    return false;
+                }
+                if let crate::transfer::ClientInput::Passthrough(pane) =
+                    crate::transfer::gate().on_client_input(client_id, &data)
+                {
+                    self.write_transfer_input(pane, data);
                     return false;
                 }
                 let events = if let Some(client) = self.clients.get_mut(&client_id) {
@@ -5411,6 +5520,8 @@ mod tests {
             should_quit,
             server_event_rx,
             server_event_tx,
+            transfer_candidate: (0, 0),
+            transfer_active_pane: None,
         }
     }
 

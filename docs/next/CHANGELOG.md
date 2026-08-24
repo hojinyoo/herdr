@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Added
+- `trz` / `tsz` file transfers now work through a pane. While a transfer runs, the pane hands its raw bytes straight to the attached client instead of rendering them, so the trzsz client upstream sees the child's own protocol stream. Disable with `terminal.file_transfer = false`.
+
 ## [0.8.2] - 2026-08-19
 
 ### Added
