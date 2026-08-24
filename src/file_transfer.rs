@@ -27,8 +27,8 @@ pub(crate) enum TransferError {
     TooLarge {
         size: u64,
     },
-    /// A file with that name already exists at the destination.
-    Exists {
+    /// Every suffixed candidate for that name was taken.
+    NoFreeName {
         name: String,
     },
     /// The peer sent a chunk out of order, or more bytes than it announced.
@@ -45,7 +45,12 @@ impl std::fmt::Display for TransferError {
                 f,
                 "file is {size} bytes; Herdr's transfer limit is {MAX_FILE_TRANSFER_SIZE} bytes"
             ),
-            Self::Exists { name } => write!(f, "{name} already exists; refusing to overwrite"),
+            Self::NoFreeName { name } => {
+                write!(
+                    f,
+                    "could not find a free name for {name} at the destination"
+                )
+            }
             Self::Desync => write!(f, "transfer desynchronized"),
             Self::Io(err) => write!(f, "{err}"),
         }
@@ -83,10 +88,14 @@ pub(crate) fn checked_name(name: &str) -> Result<&str, TransferError> {
     }
 }
 
+/// Longest destination file name, in bytes. `NAME_MAX` is 255 on the platforms
+/// Herdr ships for.
+const MAX_NAME_BYTES: usize = 255;
+
 /// Platform-independent rejection table. No `cfg` here, ever — see
 /// `checked_name`.
 fn is_unsafe_name(name: &str) -> bool {
-    if name.is_empty() || name.len() > 255 {
+    if name.is_empty() || name.len() > MAX_NAME_BYTES {
         return true;
     }
     // `\0` truncates C-string path APIs; `/` and `\` are separators somewhere;
@@ -141,26 +150,76 @@ pub(crate) fn open_source(path: &Path) -> Result<(fs::File, String, u64), Transf
     Ok((fs::File::open(path)?, name, size))
 }
 
-/// Creates the destination file, refusing to overwrite.
+/// Number of `name-N` candidates tried before giving up, matching the retry
+/// bound `server::clipboard_image::stage` uses.
+const MAX_NAME_ATTEMPTS: u32 = 100;
+
+/// Creates the destination file, suffixing the name rather than overwriting.
 ///
-/// `create_new` makes the refusal atomic, so there is no check-then-create race
-/// and no need for the unique-name retry `server::clipboard_image::stage` does.
-/// It also refuses to follow a pre-existing symlink at the destination.
+/// Every attempt uses `create_new`, so an existing file is never clobbered and
+/// there is no check-then-create race; the loop only picks the next candidate.
+/// `create_new` also refuses to follow a pre-existing symlink at the
+/// destination.
+///
+/// Returns the path actually written, whose file name may differ from `name`.
 fn create_destination(dir: &Path, name: &str) -> Result<(PathBuf, fs::File), TransferError> {
     let name = checked_name(name)?;
     fs::create_dir_all(dir)?;
-    let path = dir.join(name);
 
-    let mut options = fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    restrict_file_options(&mut options);
-    match options.open(&path) {
-        Ok(file) => Ok((path, file)),
-        Err(err) if err.kind() == io::ErrorKind::AlreadyExists => Err(TransferError::Exists {
-            name: name.to_owned(),
-        }),
-        Err(err) => Err(TransferError::Io(err)),
+    for attempt in 0..MAX_NAME_ATTEMPTS {
+        let candidate = if attempt == 0 {
+            name.to_owned()
+        } else {
+            suffixed_name(name, attempt)
+        };
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        restrict_file_options(&mut options);
+        let path = dir.join(&candidate);
+        match options.open(&path) {
+            Ok(file) => return Ok((path, file)),
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(TransferError::Io(err)),
+        }
     }
+
+    Err(TransferError::NoFreeName {
+        name: name.to_owned(),
+    })
+}
+
+/// `notes.txt` + 1 -> `notes-1.txt`. A dotfile with no extension keeps its
+/// leading dot (`.gitignore` -> `.gitignore-1`) because `Path::file_stem`
+/// treats the whole name as the stem.
+///
+/// The result is clamped to `MAX_NAME_BYTES`; `checked_name` already bounds the
+/// input there, so appending a suffix is exactly what can push it over and make
+/// the filesystem reject the write with an opaque `ENAMETOOLONG`.
+fn suffixed_name(name: &str, attempt: u32) -> String {
+    let path = Path::new(name);
+    let stem = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or(name);
+    let extension = path.extension().and_then(|ext| ext.to_str());
+
+    let tail = match extension {
+        Some(extension) => format!("-{attempt}.{extension}"),
+        None => format!("-{attempt}"),
+    };
+    let budget = MAX_NAME_BYTES.saturating_sub(tail.len());
+    format!("{}{tail}", truncate_on_char_boundary(stem, budget))
+}
+
+fn truncate_on_char_boundary(text: &str, max_bytes: usize) -> &str {
+    if text.len() <= max_bytes {
+        return text;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
 }
 
 #[cfg(unix)]
@@ -249,13 +308,20 @@ impl Receiver {
             return Err(TransferError::TooLarge { size });
         }
         let (path, file) = create_destination(dir, name)?;
+        // The written name, not the announced one: a collision was suffixed and
+        // the sender's popup has to name the file that actually exists.
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(name)
+            .to_owned();
         Ok(Self {
             path,
             file: Some(file),
             size,
             written: 0,
             next_seq: 0,
-            name: name.to_owned(),
+            name,
         })
     }
 
@@ -403,12 +469,54 @@ mod tests {
     }
 
     #[test]
-    fn create_destination_refuses_to_overwrite() {
+    fn create_destination_suffixes_instead_of_overwriting() {
         let dir = tempdir("overwrite");
-        let (path, _file) = create_destination(&dir, "a.txt").expect("first create");
-        assert!(path.exists());
-        let err = create_destination(&dir, "a.txt").expect_err("second create");
-        assert!(matches!(err, TransferError::Exists { .. }), "{err}");
+        let (first, _a) = create_destination(&dir, "a.txt").expect("first create");
+        assert_eq!(first.file_name().unwrap(), "a.txt");
+        fs::write(&first, b"original").expect("seed");
+
+        let (second, _b) = create_destination(&dir, "a.txt").expect("second create");
+        assert_eq!(second.file_name().unwrap(), "a-1.txt");
+        let (third, _c) = create_destination(&dir, "a.txt").expect("third create");
+        assert_eq!(third.file_name().unwrap(), "a-2.txt");
+
+        // The point of suffixing: the original is still intact.
+        assert_eq!(fs::read(&first).expect("read original"), b"original");
+    }
+
+    #[test]
+    fn suffixed_name_keeps_extensions_and_dotfiles_intact() {
+        assert_eq!(suffixed_name("notes.txt", 1), "notes-1.txt");
+        assert_eq!(suffixed_name("notes", 2), "notes-2");
+        // `.gitignore` is all stem, so the leading dot must survive.
+        assert_eq!(suffixed_name(".gitignore", 1), ".gitignore-1");
+        assert_eq!(suffixed_name("archive.tar.gz", 1), "archive.tar-1.gz");
+    }
+
+    #[test]
+    fn suffixed_name_stays_within_the_name_length_limit() {
+        // `checked_name` accepts exactly 255 bytes, so the suffix is what would
+        // push the write past NAME_MAX and fail with an opaque ENAMETOOLONG.
+        let long = format!("{}.txt", "a".repeat(MAX_NAME_BYTES - 4));
+        assert_eq!(long.len(), MAX_NAME_BYTES);
+        assert!(checked_name(&long).is_ok());
+        let suffixed = suffixed_name(&long, 7);
+        assert!(suffixed.len() <= MAX_NAME_BYTES, "{}", suffixed.len());
+        assert!(suffixed.ends_with("-7.txt"));
+
+        // Multi-byte stems must not be cut mid-character.
+        let wide = format!("{}.txt", "가".repeat(80));
+        let suffixed = suffixed_name(&wide, 3);
+        assert!(suffixed.len() <= MAX_NAME_BYTES);
+        assert!(std::str::from_utf8(suffixed.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn receiver_reports_the_name_it_actually_wrote() {
+        let dir = tempdir("reported-name");
+        let _first = Receiver::create(&dir, "a.bin", 1).expect("first");
+        let second = Receiver::create(&dir, "a.bin", 1).expect("second");
+        assert_eq!(second.name(), "a-1.bin");
     }
 
     #[test]

@@ -49,12 +49,16 @@ one path and press Enter.
   working directory, and writes it into `remote.file_transfer_dir`
   (`~/Downloads` by default).
 
-Herdr never overwrites: if a file of that name already exists at the
-destination, the transfer is refused and the popup says so. Press Esc to cancel
-a running transfer; a partially written file is removed.
+Herdr never overwrites an existing file. If a file of that name is already at
+the destination, the new one is saved with a numbered suffix (`notes.txt` ->
+`notes-1.txt`) and the popup reports the name it actually wrote. Press Esc to
+cancel a running transfer; a partially written file is removed.
 
-One transfer runs at a time, files are limited to 16 MiB, and directories are
-not supported yet.
+One transfer runs at a time, files are limited to 256 MiB, and directories are
+not supported yet. Transfers acknowledge each 256 KiB chunk before sending the
+next, so throughput is bounded by round-trip latency: expect roughly 20s for a
+256 MiB file on a fast link and appreciably longer on a distant one. There is no
+resume, so a dropped connection restarts the transfer.
 
 ## Remote attach over SSH
 

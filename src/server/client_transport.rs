@@ -375,6 +375,8 @@ pub(crate) enum ServerEvent {
         transfer_id: u64,
         ok: bool,
         error: Option<String>,
+        /// Name the client wrote when it was the receiver, if it differs.
+        saved_name: Option<String>,
     },
     /// A client acknowledged one download chunk, releasing the next.
     ClientFileTransferAck {
@@ -997,11 +999,13 @@ fn client_read_loop(
                 transfer_id,
                 ok,
                 error,
+                saved_name,
             } => ServerEvent::ClientFileTransferEnd {
                 client_id,
                 transfer_id,
                 ok,
                 error,
+                saved_name,
             },
             ClientMessage::FileTransferAck { transfer_id, seq } => {
                 ServerEvent::ClientFileTransferAck {

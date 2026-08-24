@@ -3269,7 +3269,10 @@ impl HeadlessServer {
                 transfer_id,
                 ok,
                 error,
-            } => self.handle_client_file_transfer_end(client_id, transfer_id, ok, error),
+                saved_name,
+            } => {
+                self.handle_client_file_transfer_end(client_id, transfer_id, ok, error, saved_name)
+            }
             ServerEvent::ClientResize {
                 client_id,
                 cols,

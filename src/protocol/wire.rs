@@ -28,10 +28,14 @@ pub const MAX_GRAPHICS_FRAME_SIZE: usize = 32 * 1024 * 1024;
 pub const MAX_CLIPBOARD_IMAGE_PAYLOAD: usize = 16 * 1024 * 1024;
 
 /// Maximum total size of one native file transfer, in either direction.
-// ponytail: reuses the 16 MiB clipboard ceiling rather than introducing a
-// second, larger cap. A bigger cap needs real backpressure accounting on the
-// unbounded control queue, not just a larger number.
-pub const MAX_FILE_TRANSFER_SIZE: u64 = MAX_CLIPBOARD_IMAGE_PAYLOAD as u64;
+///
+/// Safe at this size only because of strict stop-and-wait: one chunk is in
+/// flight at a time, so resident memory is `FILE_TRANSFER_CHUNK_SIZE`
+/// regardless of how large the file is.
+// ponytail: 256 KiB per round trip is also the throughput ceiling, so a full
+// 256 MiB transfer costs roughly 21s at 20ms RTT and 105s at 100ms. There is no
+// resume, so a drop restarts it. Raise the window before raising this again.
+pub const MAX_FILE_TRANSFER_SIZE: u64 = 256 * 1024 * 1024;
 
 /// Payload bytes carried by one `FileTransferChunk`.
 // ponytail: strict stop-and-wait, one chunk in flight, because
@@ -487,6 +491,11 @@ pub enum ClientMessage {
         ok: bool,
         /// Human-readable failure reason when `ok` is false.
         error: Option<String>,
+        /// Set only when this client was the receiver: the file name actually
+        /// written, which differs from the announced one when a collision was
+        /// suffixed. The sender's popup would otherwise name a file that is not
+        /// on disk.
+        saved_name: Option<String>,
     },
 
     /// Acknowledge one received download chunk, releasing the next one.
@@ -1255,6 +1264,7 @@ mod tests {
                 transfer_id: 1,
                 ok: true,
                 error: None,
+                saved_name: None,
             }),
             15
         );
@@ -1409,6 +1419,7 @@ mod tests {
                 transfer_id: 7,
                 ok: true,
                 error: None,
+                saved_name: Some("notes-1.txt".to_owned()),
             },
             ClientMessage::FileTransferAck {
                 transfer_id: 7,

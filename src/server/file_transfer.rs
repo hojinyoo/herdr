@@ -317,6 +317,7 @@ impl HeadlessServer {
         transfer_id: u64,
         ok: bool,
         error: Option<String>,
+        saved_name: Option<String>,
     ) -> bool {
         let Some(transfer) = self.file_transfer.as_ref() else {
             return false;
@@ -332,9 +333,15 @@ impl HeadlessServer {
         }
 
         match transfer.direction {
-            // The client wrote the file; its `ok` is the verdict.
+            // The client wrote the file; its `ok` is the verdict, and its
+            // `saved_name` is the only place the suffixed name exists.
             FileTransferDirection::Download => {
                 self.file_transfer = None;
+                if let (Some(state), Some(saved_name)) =
+                    (self.app.state.file_transfer.as_mut(), saved_name)
+                {
+                    state.name = saved_name;
+                }
                 self.finish_file_transfer_ui(Ok(()));
             }
             // An upload is only complete when the bytes are on disk here.

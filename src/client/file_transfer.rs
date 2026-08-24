@@ -41,6 +41,7 @@ fn failure(transfer_id: u64, err: &TransferError) -> ClientMessage {
         transfer_id,
         ok: false,
         error: Some(err.to_string()),
+        saved_name: None,
     }
 }
 
@@ -49,6 +50,7 @@ fn busy(transfer_id: u64) -> ClientMessage {
         transfer_id,
         ok: false,
         error: Some("a transfer is already in progress".to_owned()),
+        saved_name: None,
     }
 }
 
@@ -99,6 +101,7 @@ pub(super) fn begin_upload(
                 transfer_id,
                 ok: true,
                 error: None,
+                saved_name: None,
             });
             return replies;
         }
@@ -178,6 +181,7 @@ pub(super) fn handle_chunk(
 }
 
 fn finish_download(receiver: engine::Receiver, transfer_id: u64) -> Replies {
+    let saved_name = receiver.name().to_owned();
     match receiver.finish() {
         Ok(path) => {
             debug!(path = %path.display(), "file transfer received");
@@ -185,6 +189,9 @@ fn finish_download(receiver: engine::Receiver, transfer_id: u64) -> Replies {
                 transfer_id,
                 ok: true,
                 error: None,
+                // A collision was suffixed here, so the server's popup would
+                // otherwise name a file that is not on this disk.
+                saved_name: Some(saved_name),
             }]
         }
         Err(err) => vec![failure(transfer_id, &err)],
@@ -223,6 +230,7 @@ pub(super) fn handle_ack(slot: &mut Option<ClientTransfer>, transfer_id: u64, se
                 transfer_id,
                 ok: true,
                 error: None,
+                saved_name: None,
             }]
         }
         Err(err) => {
@@ -256,6 +264,7 @@ fn stray(slot: &Option<ClientTransfer>, transfer_id: u64) -> Replies {
         transfer_id,
         ok: false,
         error: Some("no such transfer".to_owned()),
+        saved_name: None,
     }]
 }
 
