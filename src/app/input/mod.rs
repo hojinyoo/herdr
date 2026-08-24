@@ -51,9 +51,9 @@ mod terminal;
 pub(crate) use self::{
     lease::{ConsumedInputLease, ForwardedInputLease, InputLeaseKey, InputLeaseTable, RepeatPlan},
     modal::{
-        handle_global_menu_key, handle_keybind_help_key, handle_navigator_key,
-        insert_keybind_help_query_text, insert_navigator_search_text, insert_rename_input_text,
-        open_new_workspace_dialog,
+        handle_file_transfer_path_key, handle_file_transfer_progress_key, handle_global_menu_key,
+        handle_keybind_help_key, handle_navigator_key, insert_keybind_help_query_text,
+        insert_navigator_search_text, insert_rename_input_text, open_new_workspace_dialog,
     },
     navigate::{
         terminal_direct_indexed_navigation_action, terminal_direct_non_indexed_navigation_action,
@@ -116,6 +116,10 @@ impl App {
                 Mode::KeybindHelp => handle_keybind_help_key(&mut self.state, key),
                 Mode::Navigator => {
                     handle_navigator_key(&mut self.state, &self.terminal_runtimes, key_event)
+                }
+                Mode::FileTransferPath => handle_file_transfer_path_key(&mut self.state, key_event),
+                Mode::FileTransferProgress => {
+                    handle_file_transfer_progress_key(&mut self.state, key_event)
                 }
                 Mode::Terminal => unreachable!(),
             },
@@ -209,7 +213,7 @@ impl App {
 
     pub(crate) fn paste_into_active_text_input(&mut self, text: &str) -> bool {
         match self.state.mode {
-            Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane => {
+            Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane | Mode::FileTransferPath => {
                 insert_rename_input_text(&mut self.state, text);
                 true
             }

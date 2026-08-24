@@ -285,7 +285,7 @@ enum AltScreenReadConflict {
 
 /// The headless server — runs the herdr event loop without a real terminal.
 pub struct HeadlessServer {
-    app: app::App,
+    pub(super) app: app::App,
     #[cfg(unix)]
     api_tx: Option<api::ApiRequestSender>,
     // Kept on every platform so dropping HeadlessServer owns API server shutdown.
@@ -299,7 +299,11 @@ pub struct HeadlessServer {
     #[cfg(unix)]
     next_client_id: u64,
     /// The client currently driving the shared pane runtime size, theme, and input keybindings.
-    foreground_client_id: Option<u64>,
+    pub(super) foreground_client_id: Option<u64>,
+    /// The one native file transfer in flight, if any. One at a time keeps the
+    /// stop-and-wait bookkeeping to a single slot.
+    pub(super) file_transfer: Option<super::file_transfer::ServerTransfer>,
+    pub(super) next_file_transfer_id: u64,
     /// Outer window title last pushed, paired with the client that received it.
     /// Keying on the client means a newly attached terminal is written to even
     /// when the title itself has not changed, without every code path that
@@ -517,6 +521,8 @@ impl HeadlessServer {
             #[cfg(unix)]
             next_client_id: 1,
             foreground_client_id: None,
+            file_transfer: None,
+            next_file_transfer_id: 0,
             sent_window_title: None,
             api_window_title: None,
             server_keybindings,
@@ -1024,6 +1030,11 @@ impl HeadlessServer {
             self.reload_server_config(true);
             needs_render = true;
             crate::render_prof::event("full_render_cause.config_reload");
+        }
+
+        if self.drain_file_transfer_requests() {
+            needs_render = true;
+            crate::render_prof::event("full_render_cause.file_transfer");
         }
 
         needs_render
@@ -2720,7 +2731,7 @@ impl HeadlessServer {
 
     /// Sends a message to a specific client. Returns false if the client
     /// was not found or the send failed (client removed).
-    fn send_to_client(&mut self, client_id: u64, msg: ServerMessage) -> bool {
+    pub(super) fn send_to_client(&mut self, client_id: u64, msg: ServerMessage) -> bool {
         let serialized = match Self::frame_server_message(&msg) {
             Ok(framed) => framed,
             Err(err) => {
@@ -3236,6 +3247,29 @@ impl HeadlessServer {
                     }
                 }
             }
+            ServerEvent::ClientFileTransferStart {
+                client_id,
+                transfer_id,
+                name,
+                size,
+            } => self.handle_client_file_transfer_start(client_id, transfer_id, name, size),
+            ServerEvent::ClientFileTransferChunk {
+                client_id,
+                transfer_id,
+                seq,
+                data,
+            } => self.handle_client_file_transfer_chunk(client_id, transfer_id, seq, data),
+            ServerEvent::ClientFileTransferAck {
+                client_id,
+                transfer_id,
+                seq,
+            } => self.handle_client_file_transfer_ack(client_id, transfer_id, seq),
+            ServerEvent::ClientFileTransferEnd {
+                client_id,
+                transfer_id,
+                ok,
+                error,
+            } => self.handle_client_file_transfer_end(client_id, transfer_id, ok, error),
             ServerEvent::ClientResize {
                 client_id,
                 cols,
@@ -3315,6 +3349,7 @@ impl HeadlessServer {
             }
             ServerEvent::ClientDisconnected { client_id } => {
                 info!(client_id, "client disconnected");
+                self.abort_file_transfer_for_client(client_id);
                 self.remove_client_and_resize_if_needed(client_id);
                 true
             }
@@ -5399,6 +5434,8 @@ mod tests {
             #[cfg(unix)]
             next_client_id: 1,
             foreground_client_id: None,
+            file_transfer: None,
+            next_file_transfer_id: 0,
             sent_window_title: None,
             api_window_title: None,
             server_keybindings,

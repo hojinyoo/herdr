@@ -572,6 +572,9 @@ impl App {
             request_submit_worktree_open: false,
             request_submit_worktree_remove: false,
             request_reload_config: false,
+            request_file_transfer: None,
+            request_file_transfer_cancel: false,
+            file_transfer: None,
             request_client_config_reload: false,
             request_clipboard_write: None,
             creating_new_tab: false,
@@ -1070,6 +1073,20 @@ impl App {
             if self.state.request_reload_config {
                 self.state.request_reload_config = false;
                 self.reload_config();
+                needs_render = true;
+            }
+
+            // Monolithic mode has no client process, so there is no second
+            // machine to move bytes to or from. Say so instead of leaving the
+            // popup spinning forever.
+            if self.state.request_file_transfer.take().is_some()
+                || std::mem::take(&mut self.state.request_file_transfer_cancel)
+            {
+                if let Some(transfer) = self.state.file_transfer.as_mut() {
+                    transfer.outcome = Some(Err(
+                        "file transfer needs a client connection; run herdr with a server".into(),
+                    ));
+                }
                 needs_render = true;
             }
 
@@ -1957,6 +1974,12 @@ impl App {
             Mode::ProductAnnouncement => {
                 self.handle_product_announcement_key(key_event);
             }
+            Mode::FileTransferPath => {
+                input::handle_file_transfer_path_key(&mut self.state, key_event);
+            }
+            Mode::FileTransferProgress => {
+                input::handle_file_transfer_progress_key(&mut self.state, key_event);
+            }
             Mode::Settings => {
                 self.handle_settings_key(key_event);
             }
@@ -2229,6 +2252,7 @@ mod tests {
             Mode::ContextMenu,
             Mode::GlobalMenu,
             Mode::KeybindHelp,
+            Mode::FileTransferProgress,
         ] {
             assert!(mode.wants_ascii_input(), "{mode:?} should want ASCII");
         }
@@ -2244,6 +2268,7 @@ mod tests {
             Mode::Onboarding,
             Mode::ReleaseNotes,
             Mode::ProductAnnouncement,
+            Mode::FileTransferPath,
         ] {
             assert!(!mode.wants_ascii_input(), "{mode:?} should keep the IME");
         }

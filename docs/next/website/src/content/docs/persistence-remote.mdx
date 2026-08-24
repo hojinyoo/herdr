@@ -35,6 +35,27 @@ herdr session stop work --json
 herdr session delete side-project --json
 ```
 
+## Transferring files
+
+While attached with `--remote`, Herdr can move a single file between your
+machine and the remote pane over its own protocol, with progress and cancel in
+the Herdr UI. Pick **send file** or **receive file** from the global menu, or
+right-click a pane and choose **Send file...** / **Receive file...**, then type
+one path and press Enter.
+
+- **Send** reads the path on your local machine and writes it into the focused
+  pane's working directory.
+- **Receive** reads the path on the remote host, relative to the focused pane's
+  working directory, and writes it into `remote.file_transfer_dir`
+  (`~/Downloads` by default).
+
+Herdr never overwrites: if a file of that name already exists at the
+destination, the transfer is refused and the popup says so. Press Esc to cancel
+a running transfer; a partially written file is removed.
+
+One transfer runs at a time, files are limited to 16 MiB, and directories are
+not supported yet.
+
 ## Remote attach over SSH
 
 Herdr supports two remote modes. [How to work with Herdr](/docs/how-to-work/) compares them. SSH to the server and run `herdr` there for the tmux-style path, or attach through SSH from your local machine:

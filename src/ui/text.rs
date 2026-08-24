@@ -53,7 +53,12 @@ fn take_prefix_width(text: &str, max_width: usize) -> String {
     output
 }
 
-fn take_suffix_width(text: &str, max_width: usize) -> String {
+/// Keeps the **tail** of `text` within `max_width` columns.
+///
+/// Text inputs render through here so a value longer than the field stays
+/// visible at the caret instead of running off the right edge and leaving the
+/// user typing blind — file paths routinely outrun a modal's width.
+pub(crate) fn take_suffix_width(text: &str, max_width: usize) -> String {
     let mut output = Vec::new();
     let mut width = 0usize;
     for ch in text.chars().rev() {

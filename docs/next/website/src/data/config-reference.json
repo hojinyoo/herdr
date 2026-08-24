@@ -1414,6 +1414,12 @@
           "type": "boolean",
           "default": "true",
           "description": "Add keepalive fallbacks and private connection reuse for `herdr --remote`. Set false to run plain ssh unchanged."
+        },
+        {
+          "key": "remote.file_transfer_dir",
+          "type": "string",
+          "default": "~/Downloads",
+          "description": "Directory on the client machine where received files are written."
         }
       ]
     },

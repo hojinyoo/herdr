@@ -906,6 +906,10 @@ pub enum Mode {
     GlobalMenu,
     KeybindHelp,
     Navigator,
+    /// Typing the path for a file transfer, in `name_input`.
+    FileTransferPath,
+    /// Watching a transfer run, or reading why it failed.
+    FileTransferProgress,
 }
 
 impl Mode {
@@ -936,6 +940,7 @@ impl Mode {
                 | Mode::ContextMenu
                 | Mode::GlobalMenu
                 | Mode::KeybindHelp
+                | Mode::FileTransferProgress
         )
     }
 }
@@ -1327,6 +1332,7 @@ impl ContextMenuState {
                     items.push("Swap with focused pane");
                 }
                 items.extend(["Split right", "Split down", "Zoom"]);
+                items.extend(["Send file...", "Receive file..."]);
                 items.push(if right_click_passthrough {
                     "Use Herdr right-click menu"
                 } else {
@@ -1336,6 +1342,54 @@ impl ContextMenuState {
                 items
             }
         }
+    }
+}
+
+/// Which way the bytes move, from the perspective of the machine running the
+/// herdr server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileTransferDirection {
+    /// Client-local file into the focused pane's working directory.
+    Upload,
+    /// Server-side file into the client's configured download directory.
+    Download,
+}
+
+impl FileTransferDirection {
+    pub(crate) fn title(self) -> &'static str {
+        match self {
+            Self::Upload => "send file",
+            Self::Download => "receive file",
+        }
+    }
+}
+
+/// Progress mirror for the one in-flight transfer, written by the server and
+/// only read by the renderer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileTransferState {
+    pub direction: FileTransferDirection,
+    /// File name, or the typed path until the peer announces the real name.
+    pub name: String,
+    pub size: u64,
+    pub done: u64,
+    /// Set once the transfer has stopped; `None` while it is still running.
+    pub outcome: Option<Result<(), String>>,
+}
+
+impl FileTransferState {
+    pub(crate) fn finished(&self) -> bool {
+        self.outcome.is_some()
+    }
+
+    /// Completion in 0..=1. A zero-byte file is complete the moment it starts,
+    /// and must not divide by zero — this renders in the shared server render
+    /// path, where a panic would take down every pane in the session.
+    pub(crate) fn ratio(&self) -> f64 {
+        if self.size == 0 {
+            return 1.0;
+        }
+        (self.done as f64 / self.size as f64).clamp(0.0, 1.0)
     }
 }
 
@@ -1463,6 +1517,13 @@ pub struct AppState {
     pub request_submit_worktree_open: bool,
     pub request_submit_worktree_remove: bool,
     pub request_reload_config: bool,
+    /// Set when the user confirmed a file transfer path. Drained by the server,
+    /// which owns the transfer itself.
+    pub request_file_transfer: Option<(FileTransferDirection, String)>,
+    /// Set when the user pressed Esc on a running transfer.
+    pub request_file_transfer_cancel: bool,
+    /// Progress mirror for the popup. Server-owned; the TUI only renders it.
+    pub file_transfer: Option<FileTransferState>,
     /// Set when the headless server should ask attached clients to reload
     /// their client-local sound config from disk.
     pub request_client_config_reload: bool,
@@ -1852,6 +1913,9 @@ impl AppState {
             request_submit_worktree_open: false,
             request_submit_worktree_remove: false,
             request_reload_config: false,
+            request_file_transfer: None,
+            request_file_transfer_cancel: false,
+            file_transfer: None,
             request_client_config_reload: false,
             request_clipboard_write: None,
             creating_new_tab: false,

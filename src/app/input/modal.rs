@@ -6,7 +6,8 @@ use ratatui::layout::Rect;
 use crate::{
     app::{
         state::{
-            AppState, ContextMenuKind, ContextMenuState, MenuListState, Mode, NavigatorStateFilter,
+            AppState, ContextMenuKind, ContextMenuState, FileTransferDirection, FileTransferState,
+            MenuListState, Mode, NavigatorStateFilter,
         },
         App,
     },
@@ -79,13 +80,18 @@ pub(crate) enum GlobalMenuAction {
     Keybinds,
     ReloadConfig,
     Settings,
+    SendFile,
+    ReceiveFile,
 }
 
 pub(super) fn global_menu_actions(state: &AppState) -> Vec<GlobalMenuAction> {
+    // Order must match `AppState::global_menu_labels`.
     let mut actions = vec![
         GlobalMenuAction::Settings,
         GlobalMenuAction::Keybinds,
         GlobalMenuAction::ReloadConfig,
+        GlobalMenuAction::SendFile,
+        GlobalMenuAction::ReceiveFile,
     ];
     if state.update_available.is_some() || state.latest_release_notes_available {
         actions.push(GlobalMenuAction::WhatsNew);
@@ -141,7 +147,81 @@ pub(super) fn apply_global_menu_action(state: &mut AppState, action: GlobalMenuA
             leave_modal(state);
         }
         GlobalMenuAction::Settings => super::settings::open_settings(state),
+        GlobalMenuAction::SendFile => {
+            open_file_transfer_prompt(state, FileTransferDirection::Upload)
+        }
+        GlobalMenuAction::ReceiveFile => {
+            open_file_transfer_prompt(state, FileTransferDirection::Download)
+        }
     }
+}
+
+/// Opens the path prompt. The transfer itself is server state; this only
+/// collects the path and hands it over through `request_file_transfer`.
+pub(super) fn open_file_transfer_prompt(state: &mut AppState, direction: FileTransferDirection) {
+    state.name_input.clear();
+    state.name_input_replace_on_type = false;
+    state.file_transfer = Some(FileTransferState {
+        direction,
+        name: String::new(),
+        size: 0,
+        done: 0,
+        outcome: None,
+    });
+    state.mode = Mode::FileTransferPath;
+}
+
+fn close_file_transfer(state: &mut AppState) {
+    state.name_input.clear();
+    state.name_input_replace_on_type = false;
+    state.file_transfer = None;
+    leave_modal(state);
+}
+
+pub(crate) fn handle_file_transfer_path_key(state: &mut AppState, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc => close_file_transfer(state),
+        KeyCode::Enter => {
+            let path = state.name_input.trim().to_owned();
+            if path.is_empty() {
+                return;
+            }
+            let Some(transfer) = state.file_transfer.as_mut() else {
+                close_file_transfer(state);
+                return;
+            };
+            transfer.name = path.clone();
+            state.request_file_transfer = Some((transfer.direction, path));
+            state.name_input.clear();
+            state.name_input_replace_on_type = false;
+            state.mode = Mode::FileTransferProgress;
+        }
+        KeyCode::Backspace => delete_rename_input_char(state),
+        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            clear_rename_input(state)
+        }
+        KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            insert_rename_input_text(state, &ch.to_string())
+        }
+        _ => {}
+    }
+}
+
+pub(crate) fn handle_file_transfer_progress_key(state: &mut AppState, key: KeyEvent) {
+    if !matches!(key.code, KeyCode::Esc | KeyCode::Enter) {
+        return;
+    }
+    // Esc means cancel while it runs and dismiss once it has stopped. The
+    // server owns the abort; this only asks.
+    if state
+        .file_transfer
+        .as_ref()
+        .is_some_and(|transfer| !transfer.finished())
+    {
+        state.request_file_transfer_cancel = true;
+        return;
+    }
+    close_file_transfer(state);
 }
 
 pub(crate) fn handle_global_menu_key(state: &mut AppState, key: KeyEvent) {
@@ -1271,6 +1351,18 @@ impl App {
             }
             (ContextMenuKind::Pane { pane_id, .. }, Some("Rename pane")) => {
                 open_rename_pane(&mut self.state, pane_id);
+            }
+            (
+                ContextMenuKind::Pane { pane_id, .. },
+                Some(label @ ("Send file..." | "Receive file...")),
+            ) => {
+                self.state.focus_pane(pane_id);
+                let direction = if label == "Send file..." {
+                    FileTransferDirection::Upload
+                } else {
+                    FileTransferDirection::Download
+                };
+                open_file_transfer_prompt(&mut self.state, direction);
             }
             (
                 ContextMenuKind::Pane {
@@ -2417,5 +2509,135 @@ mod tests {
         assert_eq!(app.state.mode, Mode::ConfirmClose);
         assert_eq!(app.state.workspaces.len(), 2);
         assert!(app.state.context_menu.is_none());
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::empty())
+    }
+
+    fn typed(state: &mut AppState, text: &str) {
+        for ch in text.chars() {
+            handle_file_transfer_path_key(state, key(KeyCode::Char(ch)));
+        }
+    }
+
+    #[test]
+    fn the_global_menu_labels_and_actions_stay_aligned() {
+        // The menu renders `global_menu_labels` and dispatches
+        // `global_menu_actions` by index, so a mismatch silently runs the wrong
+        // command.
+        let mut state = AppState::test_new();
+        assert_eq!(
+            state.global_menu_labels().len(),
+            global_menu_actions(&state).len()
+        );
+
+        state.update_available = Some("9.9.9".to_owned());
+        assert_eq!(
+            state.global_menu_labels().len(),
+            global_menu_actions(&state).len()
+        );
+    }
+
+    #[test]
+    fn confirming_a_path_hands_it_to_the_server_and_shows_progress() {
+        let mut state = AppState::test_new();
+        open_file_transfer_prompt(&mut state, FileTransferDirection::Upload);
+        assert_eq!(state.mode, Mode::FileTransferPath);
+
+        typed(&mut state, "notes.txt");
+        handle_file_transfer_path_key(&mut state, key(KeyCode::Enter));
+
+        assert_eq!(
+            state.request_file_transfer,
+            Some((FileTransferDirection::Upload, "notes.txt".to_owned()))
+        );
+        assert_eq!(state.mode, Mode::FileTransferProgress);
+        // The path field is reused by other dialogs, so it must not leak.
+        assert!(state.name_input.is_empty());
+        let transfer = state.file_transfer.as_ref().expect("popup state");
+        assert_eq!(transfer.name, "notes.txt");
+        assert!(!transfer.finished());
+    }
+
+    #[test]
+    fn an_empty_path_does_not_start_a_transfer() {
+        let mut state = AppState::test_new();
+        open_file_transfer_prompt(&mut state, FileTransferDirection::Download);
+        typed(&mut state, "   ");
+        handle_file_transfer_path_key(&mut state, key(KeyCode::Enter));
+
+        assert!(state.request_file_transfer.is_none());
+        assert_eq!(state.mode, Mode::FileTransferPath);
+    }
+
+    #[test]
+    fn escape_abandons_the_prompt_without_asking_for_a_transfer() {
+        let mut state = AppState::test_new();
+        open_file_transfer_prompt(&mut state, FileTransferDirection::Upload);
+        typed(&mut state, "abc");
+        handle_file_transfer_path_key(&mut state, key(KeyCode::Esc));
+
+        assert!(state.request_file_transfer.is_none());
+        assert!(state.file_transfer.is_none());
+        assert!(state.name_input.is_empty());
+        assert_ne!(state.mode, Mode::FileTransferPath);
+    }
+
+    #[test]
+    fn escape_cancels_a_running_transfer_but_only_dismisses_a_finished_one() {
+        let mut state = AppState::test_new();
+        open_file_transfer_prompt(&mut state, FileTransferDirection::Download);
+        typed(&mut state, "out.log");
+        handle_file_transfer_path_key(&mut state, key(KeyCode::Enter));
+
+        // Running: Esc asks the server to abort and keeps the popup up, because
+        // only the server knows when the abort actually took effect.
+        handle_file_transfer_progress_key(&mut state, key(KeyCode::Esc));
+        assert!(state.request_file_transfer_cancel);
+        assert_eq!(state.mode, Mode::FileTransferProgress);
+
+        // Finished: Esc closes it.
+        state.request_file_transfer_cancel = false;
+        state.file_transfer.as_mut().expect("popup state").outcome =
+            Some(Err("out.log already exists".to_owned()));
+        handle_file_transfer_progress_key(&mut state, key(KeyCode::Esc));
+        assert!(!state.request_file_transfer_cancel);
+        assert!(state.file_transfer.is_none());
+        assert_ne!(state.mode, Mode::FileTransferProgress);
+    }
+
+    #[test]
+    fn a_zero_byte_transfer_reports_full_progress_without_dividing_by_zero() {
+        let state = FileTransferState {
+            direction: FileTransferDirection::Download,
+            name: "empty".to_owned(),
+            size: 0,
+            done: 0,
+            outcome: None,
+        };
+        assert_eq!(state.ratio(), 1.0);
+    }
+
+    #[test]
+    fn the_pane_context_menu_offers_both_directions() {
+        let workspace = crate::workspace::Workspace::test_new("panes");
+        let pane_id = workspace.tabs[0].root_pane;
+        let items = ContextMenuState {
+            kind: ContextMenuKind::Pane {
+                ws_idx: 0,
+                tab_idx: 0,
+                pane_id,
+                source_pane_id: None,
+                has_manual_label: false,
+                right_click_passthrough: false,
+            },
+            x: 0,
+            y: 0,
+            list: MenuListState::new(0),
+        }
+        .items();
+        assert!(items.contains(&"Send file..."));
+        assert!(items.contains(&"Receive file..."));
     }
 }

@@ -197,7 +197,13 @@ impl AppState {
     }
 
     pub(crate) fn global_menu_labels(&self) -> Vec<&'static str> {
-        let mut labels = vec!["settings", "keybinds", "reload config"];
+        let mut labels = vec![
+            "settings",
+            "keybinds",
+            "reload config",
+            "send file",
+            "receive file",
+        ];
         if self.update_available.is_some() {
             labels.push("update ready");
         } else if self.latest_release_notes_available {
@@ -646,6 +652,8 @@ mod tests {
                 "settings",
                 "keybinds",
                 "reload config",
+                "send file",
+                "receive file",
                 "update ready",
                 "detach"
             ]
@@ -667,14 +675,30 @@ mod tests {
 
         assert_eq!(
             app.state.global_menu_labels(),
-            vec!["settings", "keybinds", "reload config", "detach"]
+            vec![
+                "settings",
+                "keybinds",
+                "reload config",
+                "send file",
+                "receive file",
+                "detach"
+            ]
         );
 
+        // Click the detach row by looking it up rather than by a fixed offset:
+        // the menu grows over time, and a hardcoded row would quietly start
+        // clicking a different command instead of failing.
+        let detach_idx = app
+            .state
+            .global_menu_labels()
+            .iter()
+            .position(|label| *label == "detach")
+            .expect("detach entry");
         let menu = app.state.global_menu_rect();
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
             menu.x + 2,
-            menu.y + 4,
+            menu.y + 1 + detach_idx as u16,
         ));
 
         assert!(app.state.detach_requested);
@@ -693,6 +717,8 @@ mod tests {
                 "settings",
                 "keybinds",
                 "reload config",
+                "send file",
+                "receive file",
                 "what's new",
                 "detach"
             ]

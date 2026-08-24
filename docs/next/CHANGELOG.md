@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Added
+- `herdr --remote` sessions can now send and receive a single file over Herdr's own protocol, with progress and cancel in the Herdr UI. Received files land in `remote.file_transfer_dir` (`~/Downloads` by default); sent files land in the focused pane's working directory. (#508)
 - Custom themes can now define separate light and dark color overrides when automatic theme switching is enabled. (#837, thanks @aneym)
 
 ### Fixed

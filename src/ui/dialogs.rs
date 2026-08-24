@@ -6,12 +6,15 @@ use ratatui::{
     Frame,
 };
 
-use super::text::{display_width_u16, truncate_end};
+use super::text::{display_width_u16, take_suffix_width, truncate_end};
 use super::widgets::{
     action_button_row_rects, centered_popup_rect, panel_contrast_fg, render_action_button,
     render_modal_header, render_modal_shell, render_panel_shell, ActionButtonSpec,
 };
-use crate::app::{state::WorktreeOpenState, AppState, Mode};
+use crate::app::{
+    state::{FileTransferDirection, WorktreeOpenState},
+    AppState, Mode,
+};
 use crate::terminal::TerminalRuntimeRegistry;
 
 const NEW_LINKED_WORKTREE_POPUP_WIDTH: u16 = 68;
@@ -55,8 +58,12 @@ fn render_name_input_field(app: &AppState, frame: &mut Frame, input_rect: Rect) 
         width: input_rect.width.saturating_sub(1),
         ..input_rect
     };
+    // Show the tail once the value outruns the field: the caret clamps to the
+    // right edge, so rendering from the start would park it past text the user
+    // cannot see.
+    let visible = take_suffix_width(&app.name_input, text_rect.width.saturating_sub(1) as usize);
     frame.render_widget(
-        Paragraph::new(format!(" {}", app.name_input)).style(
+        Paragraph::new(format!(" {visible}")).style(
             Style::default()
                 .fg(app.palette.text)
                 .bg(app.palette.surface0),
@@ -70,7 +77,7 @@ fn render_name_input_field(app: &AppState, frame: &mut Frame, input_rect: Rect) 
     let caret_x = input_rect
         .x
         .saturating_add(1)
-        .saturating_add(display_width_u16(&app.name_input))
+        .saturating_add(display_width_u16(&visible))
         .min(input_rect.right().saturating_sub(1));
     frame.set_cursor_position((caret_x, input_rect.y));
 }
@@ -139,6 +146,193 @@ pub(super) fn render_rename_overlay(app: &AppState, frame: &mut Frame, area: Rec
             .fg(app.palette.text)
             .bg(app.palette.surface0)
             .add_modifier(Modifier::BOLD),
+    );
+}
+
+const FILE_TRANSFER_POPUP_WIDTH: u16 = 60;
+const FILE_TRANSFER_POPUP_HEIGHT: u16 = 8;
+
+pub(crate) fn file_transfer_button_rects(inner: Rect) -> (Rect, Rect) {
+    let rects = action_button_row_rects(
+        inner,
+        &[
+            ActionButtonSpec {
+                hint: Some("↵"),
+                label: "start",
+            },
+            ActionButtonSpec {
+                hint: Some("esc"),
+                label: "cancel",
+            },
+        ],
+        2,
+        3,
+    );
+    (rects[0], rects[1])
+}
+
+pub(super) fn render_file_transfer_prompt(app: &AppState, frame: &mut Frame, area: Rect) {
+    super::dim_background(frame, area);
+
+    let Some(transfer) = app.file_transfer.as_ref() else {
+        return;
+    };
+    let Some(inner) = render_modal_shell(
+        frame,
+        area,
+        FILE_TRANSFER_POPUP_WIDTH,
+        FILE_TRANSFER_POPUP_HEIGHT,
+        &app.palette,
+    ) else {
+        return;
+    };
+    if inner.height < 5 {
+        return;
+    }
+
+    let rows = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(0),
+    ])
+    .areas::<5>(inner);
+
+    render_modal_header(frame, rows[0], transfer.direction.title(), &app.palette);
+
+    let hint = match transfer.direction {
+        FileTransferDirection::Upload => "path on this computer",
+        FileTransferDirection::Download => "path on the remote pane",
+    };
+    frame.render_widget(
+        Paragraph::new(truncate_end(hint, rows[1].width as usize))
+            .style(Style::default().fg(app.palette.overlay0)),
+        rows[1],
+    );
+
+    let input_rect = Rect::new(rows[2].x, rows[2].y, rows[2].width, 1);
+    render_name_input_field(app, frame, input_rect);
+
+    let (start_rect, cancel_rect) = file_transfer_button_rects(inner);
+    render_action_button(
+        frame,
+        start_rect,
+        Some("↵"),
+        "start",
+        Style::default()
+            .fg(panel_contrast_fg(&app.palette))
+            .bg(app.palette.accent)
+            .add_modifier(Modifier::BOLD),
+    );
+    render_action_button(
+        frame,
+        cancel_rect,
+        Some("esc"),
+        "cancel",
+        Style::default()
+            .fg(app.palette.text)
+            .bg(app.palette.surface0),
+    );
+}
+
+fn human_bytes(bytes: u64) -> String {
+    const KIB: u64 = 1024;
+    const MIB: u64 = 1024 * KIB;
+    if bytes >= MIB {
+        format!("{:.1} MiB", bytes as f64 / MIB as f64)
+    } else if bytes >= KIB {
+        format!("{:.1} KiB", bytes as f64 / KIB as f64)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+fn progress_bar(ratio: f64, width: u16) -> String {
+    let width = width as usize;
+    let filled = ((ratio * width as f64).round() as usize).min(width);
+    format!("{}{}", "█".repeat(filled), "░".repeat(width - filled))
+}
+
+pub(super) fn render_file_transfer_progress(app: &AppState, frame: &mut Frame, area: Rect) {
+    super::dim_background(frame, area);
+
+    let Some(transfer) = app.file_transfer.as_ref() else {
+        return;
+    };
+    let Some(inner) = render_modal_shell(
+        frame,
+        area,
+        FILE_TRANSFER_POPUP_WIDTH,
+        FILE_TRANSFER_POPUP_HEIGHT,
+        &app.palette,
+    ) else {
+        return;
+    };
+    if inner.height < 5 {
+        return;
+    }
+
+    let rows = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(0),
+    ])
+    .areas::<5>(inner);
+
+    render_modal_header(frame, rows[0], transfer.direction.title(), &app.palette);
+    frame.render_widget(
+        Paragraph::new(truncate_end(&transfer.name, rows[1].width as usize))
+            .style(Style::default().fg(app.palette.text)),
+        rows[1],
+    );
+
+    match transfer.outcome.as_ref() {
+        Some(Err(error)) => {
+            frame.render_widget(
+                Paragraph::new(error.as_str())
+                    .style(Style::default().fg(app.palette.red))
+                    .wrap(Wrap { trim: true }),
+                Rect::new(rows[2].x, rows[2].y, rows[2].width, 2),
+            );
+        }
+        outcome => {
+            frame.render_widget(
+                Paragraph::new(progress_bar(transfer.ratio(), rows[2].width))
+                    .style(Style::default().fg(app.palette.accent)),
+                rows[2],
+            );
+            let status = if outcome.is_some() {
+                format!("done — {}", human_bytes(transfer.size))
+            } else {
+                format!(
+                    "{} / {}",
+                    human_bytes(transfer.done),
+                    human_bytes(transfer.size)
+                )
+            };
+            frame.render_widget(
+                Paragraph::new(status).style(Style::default().fg(app.palette.overlay0)),
+                rows[3],
+            );
+        }
+    }
+
+    let (_, dismiss_rect) = file_transfer_button_rects(inner);
+    render_action_button(
+        frame,
+        dismiss_rect,
+        Some("esc"),
+        if transfer.finished() {
+            "close"
+        } else {
+            "cancel"
+        },
+        Style::default()
+            .fg(app.palette.text)
+            .bg(app.palette.surface0),
     );
 }
 
