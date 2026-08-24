@@ -29,9 +29,15 @@ pub const MAX_CLIPBOARD_IMAGE_PAYLOAD: usize = 16 * 1024 * 1024;
 
 /// Maximum total size of one native file transfer, in either direction.
 ///
-/// Safe at this size only because of strict stop-and-wait: one chunk is in
-/// flight at a time, so resident memory is `FILE_TRANSFER_CHUNK_SIZE`
-/// regardless of how large the file is.
+/// An honest peer costs `FILE_TRANSFER_CHUNK_SIZE` of resident memory
+/// regardless of file size, because one chunk is in flight at a time.
+///
+/// A hostile peer can do worse: chunk sequence numbers are predictable, so a
+/// client that acknowledges without reading its socket releases the next chunk
+/// into `ClientWriterQueue::control`, which is unbounded. Worst case is this
+/// constant's worth of server memory. That is a same-user self-DoS over a
+/// mode-restricted local socket, not a privilege boundary, so it is accepted
+/// rather than fixed — but it is the reason this number cannot grow freely.
 // ponytail: 256 KiB per round trip is also the throughput ceiling, so a full
 // 256 MiB transfer costs roughly 21s at 20ms RTT and 105s at 100ms. There is no
 // resume, so a drop restarts it. Raise the window before raising this again.

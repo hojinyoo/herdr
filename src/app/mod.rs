@@ -1079,9 +1079,9 @@ impl App {
             // Monolithic mode has no client process, so there is no second
             // machine to move bytes to or from. Say so instead of leaving the
             // popup spinning forever.
-            if self.state.request_file_transfer.take().is_some()
-                || std::mem::take(&mut self.state.request_file_transfer_cancel)
-            {
+            let requested = self.state.request_file_transfer.take().is_some();
+            let cancelled = std::mem::take(&mut self.state.request_file_transfer_cancel);
+            if requested || cancelled {
                 if let Some(transfer) = self.state.file_transfer.as_mut() {
                     transfer.outcome = Some(Err(
                         "file transfer needs a client connection; run herdr with a server".into(),

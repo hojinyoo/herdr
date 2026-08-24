@@ -57,6 +57,7 @@ pub(super) enum MouseAction {
     },
     RenameModal(ModalAction),
     ConfirmCloseAccept,
+    FileTransferModal(ModalAction),
     ContextMenu {
         menu: ContextMenuState,
         idx: usize,
@@ -215,7 +216,11 @@ impl AppState {
 
         if matches!(
             self.mode,
-            Mode::NewLinkedWorktree | Mode::OpenExistingWorktree | Mode::ConfirmRemoveWorktree
+            Mode::NewLinkedWorktree
+                | Mode::OpenExistingWorktree
+                | Mode::ConfirmRemoveWorktree
+                | Mode::FileTransferPath
+                | Mode::FileTransferProgress
         ) && !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
         {
             return None;
@@ -387,6 +392,28 @@ impl AppState {
                         }
                     }
                     return None;
+                }
+
+                if matches!(
+                    self.mode,
+                    Mode::FileTransferPath | Mode::FileTransferProgress
+                ) {
+                    let buttons = self
+                        .file_transfer_modal_inner()
+                        .map(crate::ui::file_transfer_button_rects);
+                    let action = buttons.and_then(|(start, cancel)| {
+                        modal_action_from_buttons(
+                            mouse.column,
+                            mouse.row,
+                            &[(start, ModalAction::Save), (cancel, ModalAction::Cancel)],
+                        )
+                    });
+                    // Unlike the rename modal, a click outside the popup does not
+                    // cancel: a stray click must not abort a transfer that has
+                    // already moved bytes. Swallow it instead of letting it reach
+                    // the sidebar, which would reset the mode and strip the user
+                    // of the only way to cancel.
+                    return action.map(MouseAction::FileTransferModal);
                 }
 
                 if matches!(

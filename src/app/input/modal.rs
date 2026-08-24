@@ -178,24 +178,40 @@ fn close_file_transfer(state: &mut AppState) {
     leave_modal(state);
 }
 
+fn confirm_file_transfer_path(state: &mut AppState) {
+    let path = state.name_input.trim().to_owned();
+    if path.is_empty() {
+        return;
+    }
+    let Some(transfer) = state.file_transfer.as_mut() else {
+        close_file_transfer(state);
+        return;
+    };
+    transfer.name = path.clone();
+    state.request_file_transfer = Some((transfer.direction, path));
+    state.name_input.clear();
+    state.name_input_replace_on_type = false;
+    state.mode = Mode::FileTransferProgress;
+}
+
+/// Esc on the progress popup: ask the server to abort while it runs, dismiss
+/// once it has stopped.
+fn request_file_transfer_stop(state: &mut AppState) {
+    if state
+        .file_transfer
+        .as_ref()
+        .is_some_and(|transfer| !transfer.finished())
+    {
+        state.request_file_transfer_cancel = true;
+        return;
+    }
+    close_file_transfer(state);
+}
+
 pub(crate) fn handle_file_transfer_path_key(state: &mut AppState, key: KeyEvent) {
     match key.code {
         KeyCode::Esc => close_file_transfer(state),
-        KeyCode::Enter => {
-            let path = state.name_input.trim().to_owned();
-            if path.is_empty() {
-                return;
-            }
-            let Some(transfer) = state.file_transfer.as_mut() else {
-                close_file_transfer(state);
-                return;
-            };
-            transfer.name = path.clone();
-            state.request_file_transfer = Some((transfer.direction, path));
-            state.name_input.clear();
-            state.name_input_replace_on_type = false;
-            state.mode = Mode::FileTransferProgress;
-        }
+        KeyCode::Enter => confirm_file_transfer_path(state),
         KeyCode::Backspace => delete_rename_input_char(state),
         KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             clear_rename_input(state)
@@ -207,21 +223,26 @@ pub(crate) fn handle_file_transfer_path_key(state: &mut AppState, key: KeyEvent)
     }
 }
 
+/// Mouse equivalent of Enter/Esc for the transfer popup. Routed here rather
+/// than duplicated so the button and the key path cannot drift apart.
+pub(super) fn apply_file_transfer_mouse_action(state: &mut AppState, action: ModalAction) {
+    match (state.mode, action) {
+        (Mode::FileTransferPath, ModalAction::Save) => {
+            confirm_file_transfer_path(state);
+        }
+        (Mode::FileTransferPath, ModalAction::Cancel) => close_file_transfer(state),
+        (Mode::FileTransferProgress, ModalAction::Cancel) => {
+            request_file_transfer_stop(state);
+        }
+        _ => {}
+    }
+}
+
 pub(crate) fn handle_file_transfer_progress_key(state: &mut AppState, key: KeyEvent) {
     if !matches!(key.code, KeyCode::Esc | KeyCode::Enter) {
         return;
     }
-    // Esc means cancel while it runs and dismiss once it has stopped. The
-    // server owns the abort; this only asks.
-    if state
-        .file_transfer
-        .as_ref()
-        .is_some_and(|transfer| !transfer.finished())
-    {
-        state.request_file_transfer_cancel = true;
-        return;
-    }
-    close_file_transfer(state);
+    request_file_transfer_stop(state);
 }
 
 pub(crate) fn handle_global_menu_key(state: &mut AppState, key: KeyEvent) {
@@ -1353,10 +1374,12 @@ impl App {
                 open_rename_pane(&mut self.state, pane_id);
             }
             (
-                ContextMenuKind::Pane { pane_id, .. },
+                ContextMenuKind::Pane {
+                    ws_idx, pane_id, ..
+                },
                 Some(label @ ("Send file..." | "Receive file...")),
             ) => {
-                self.state.focus_pane(pane_id);
+                self.focus_pane_internal_via_api(ws_idx, pane_id);
                 let direction = if label == "Send file..." {
                     FileTransferDirection::Upload
                 } else {
@@ -2639,5 +2662,29 @@ mod tests {
         .items();
         assert!(items.contains(&"Send file..."));
         assert!(items.contains(&"Receive file..."));
+    }
+
+    /// The popup's buttons were drawn but never hit-tested, so "cancel" was
+    /// decorative and the mode had no `handle_mouse` branch at all — every
+    /// sibling modal has one. This pins the wiring.
+    #[test]
+    fn the_popup_cancel_button_stops_a_running_transfer() {
+        let mut app = crate::app::input::app_for_mouse_test();
+        open_file_transfer_prompt(&mut app.state, FileTransferDirection::Download);
+        app.state.name_input = "a.txt".into();
+        confirm_file_transfer_path(&mut app.state);
+
+        let inner = app.state.file_transfer_modal_inner().expect("popup fits");
+        let (_start, cancel) = crate::ui::file_transfer_button_rects(inner);
+        app.handle_mouse(crate::app::input::mouse(
+            crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            cancel.x,
+            cancel.y,
+        ));
+
+        assert!(
+            app.state.request_file_transfer_cancel,
+            "the drawn cancel button must actually cancel"
+        );
     }
 }

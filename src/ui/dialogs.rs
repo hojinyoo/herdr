@@ -149,8 +149,8 @@ pub(super) fn render_rename_overlay(app: &AppState, frame: &mut Frame, area: Rec
     );
 }
 
-const FILE_TRANSFER_POPUP_WIDTH: u16 = 60;
-const FILE_TRANSFER_POPUP_HEIGHT: u16 = 8;
+pub(crate) const FILE_TRANSFER_POPUP_WIDTH: u16 = 60;
+pub(crate) const FILE_TRANSFER_POPUP_HEIGHT: u16 = 8;
 
 pub(crate) fn file_transfer_button_rects(inner: Rect) -> (Rect, Rect) {
     let rects = action_button_row_rects(

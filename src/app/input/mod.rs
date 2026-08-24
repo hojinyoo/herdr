@@ -446,6 +446,9 @@ impl App {
                     MouseAction::RenameModal(action) => {
                         self.apply_rename_mouse_action_via_api(action)
                     }
+                    MouseAction::FileTransferModal(action) => {
+                        modal::apply_file_transfer_mouse_action(&mut self.state, action)
+                    }
                     MouseAction::ConfirmCloseAccept => self.confirm_close_accept_via_api(),
                     MouseAction::ContextMenu { menu, idx } => {
                         self.apply_context_menu_action_via_api(menu, idx)

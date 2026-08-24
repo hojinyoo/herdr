@@ -6029,6 +6029,116 @@ mod tests {
         shutdown_test_runtimes(&mut server);
     }
 
+    // ---- native file transfer: the slot and the popup must settle together ----
+
+    /// A transfer is settled when the server slot is free **and** the popup has
+    /// a terminal outcome. Either one alone is a bug: a held slot refuses every
+    /// later transfer for the session, and a popup with `outcome: None` spins
+    /// forever because nothing else will ever write it.
+    fn assert_file_transfer_settled(server: &HeadlessServer, expect_ok: bool) {
+        assert!(
+            server.file_transfer.is_none(),
+            "server transfer slot should be released"
+        );
+        let outcome = server
+            .app
+            .state
+            .file_transfer
+            .as_ref()
+            .expect("popup state")
+            .outcome
+            .as_ref()
+            .expect("popup should have a terminal outcome");
+        assert_eq!(outcome.is_ok(), expect_ok, "outcome was {outcome:?}");
+    }
+
+    fn file_transfer_test_server() -> (HeadlessServer, PathBuf) {
+        let (server, _control_rx) = window_title_test_server();
+        let dir = std::env::temp_dir().join(format!(
+            "herdr-ft-{}-{}",
+            std::process::id(),
+            server.app.state.workspaces.len()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("transfer dir");
+        (server, dir)
+    }
+
+    #[test]
+    fn upload_completing_normally_releases_the_slot() {
+        let (mut server, dir) = file_transfer_test_server();
+        let id = server.begin_upload_for_test(1, dir.clone());
+
+        server.handle_client_file_transfer_start(1, id, "a.txt".to_owned(), 4);
+        server.handle_client_file_transfer_chunk(1, id, 0, b"abcd".to_vec());
+
+        assert_file_transfer_settled(&server, true);
+        assert_eq!(fs::read(dir.join("a.txt")).expect("written"), b"abcd");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn upload_claiming_success_before_the_bytes_arrive_is_refused() {
+        let (mut server, dir) = file_transfer_test_server();
+        let id = server.begin_upload_for_test(1, dir.clone());
+        server.handle_client_file_transfer_start(1, id, "a.txt".to_owned(), 1024);
+
+        // Peer announces 1 KiB, sends nothing, then claims success. Before this
+        // was handled the slot stayed occupied and the popup spun at 0 B.
+        server.handle_client_file_transfer_end(1, id, true, None, None);
+
+        assert_file_transfer_settled(&server, false);
+        assert!(
+            !dir.join("a.txt").exists(),
+            "the partial destination should be unlinked"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn upload_desync_releases_the_slot() {
+        let (mut server, dir) = file_transfer_test_server();
+        let id = server.begin_upload_for_test(1, dir.clone());
+        server.handle_client_file_transfer_start(1, id, "a.txt".to_owned(), 4);
+
+        // seq 1 before seq 0.
+        server.handle_client_file_transfer_chunk(1, id, 1, b"abcd".to_vec());
+
+        assert_file_transfer_settled(&server, false);
+        assert!(!dir.join("a.txt").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn client_disconnect_mid_transfer_releases_the_slot() {
+        let (mut server, dir) = file_transfer_test_server();
+        let id = server.begin_upload_for_test(1, dir.clone());
+        server.handle_client_file_transfer_start(1, id, "a.txt".to_owned(), 1024);
+
+        server.abort_file_transfer_for_client(1);
+
+        assert_file_transfer_settled(&server, false);
+        assert!(!dir.join("a.txt").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_start_for_an_unknown_transfer_leaves_the_live_one_alone() {
+        let (mut server, dir) = file_transfer_test_server();
+        let id = server.begin_upload_for_test(1, dir.clone());
+
+        // An unprompted id must not displace the transfer in flight, and must
+        // not write anything into the pane's cwd.
+        server.handle_client_file_transfer_start(1, id.wrapping_add(9), "evil.txt".to_owned(), 4);
+
+        assert!(
+            server.file_transfer.is_some(),
+            "live transfer was displaced"
+        );
+        assert!(!dir.join("evil.txt").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     fn test_client_writer() -> (
         ClientWriter,
         std::sync::mpsc::Receiver<Vec<u8>>,

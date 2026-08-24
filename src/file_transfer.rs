@@ -121,14 +121,29 @@ fn is_unsafe_name(name: &str) -> bool {
 /// `create_new("NUL")` succeeds, every byte is discarded, and the popup would
 /// report a success that produced no file.
 fn is_windows_reserved_name(name: &str) -> bool {
-    const RESERVED: [&str; 22] = [
-        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
-        "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    const RESERVED: [&str; 26] = [
+        "CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$", "COM0", "COM1", "COM2", "COM3", "COM4",
+        "COM5", "COM6", "COM7", "COM8", "COM9", "LPT0", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5",
+        "LPT6", "LPT7", "LPT8", "LPT9",
     ];
     let stem = name.split('.').next().unwrap_or(name);
-    RESERVED
+    if RESERVED
         .iter()
         .any(|reserved| stem.eq_ignore_ascii_case(reserved))
+    {
+        return true;
+    }
+    // Win32 also resolves the superscript digits as COM/LPT device numbers, so
+    // `COM¹` is a device even though it is not ASCII.
+    let Some(rest) = stem
+        .strip_prefix("COM")
+        .or_else(|| stem.strip_prefix("com"))
+        .or_else(|| stem.strip_prefix("LPT"))
+        .or_else(|| stem.strip_prefix("lpt"))
+    else {
+        return false;
+    };
+    matches!(rest, "¹" | "²" | "³")
 }
 
 /// Opens a file to send, returning its handle, its bare name for the wire, and
@@ -208,7 +223,10 @@ fn suffixed_name(name: &str, attempt: u32) -> String {
         None => format!("-{attempt}"),
     };
     let budget = MAX_NAME_BYTES.saturating_sub(tail.len());
-    format!("{}{tail}", truncate_on_char_boundary(stem, budget))
+    let candidate = format!("{}{tail}", truncate_on_char_boundary(stem, budget));
+    // A long enough extension blows the budget on its own (`a.` + 253 chars is a
+    // legal 255-byte name), so clamping only the stem is not sufficient.
+    truncate_on_char_boundary(&candidate, MAX_NAME_BYTES).to_owned()
 }
 
 fn truncate_on_char_boundary(text: &str, max_bytes: usize) -> &str {
@@ -346,13 +364,19 @@ impl Receiver {
     /// size are refused rather than tolerated: under strict stop-and-wait
     /// either one means the peer is broken or hostile.
     pub(crate) fn write_chunk(&mut self, seq: u32, data: &[u8]) -> Result<(), TransferError> {
-        if seq != self.next_seq || data.len() > FILE_TRANSFER_CHUNK_SIZE {
+        if seq != self.next_seq {
             return Err(TransferError::Desync);
         }
         let Some(file) = self.file.as_mut() else {
             return Err(TransferError::Desync);
         };
-        if data.len() as u64 > self.size - self.written {
+        // Exactly the size stop-and-wait implies, never merely "not too big".
+        // An empty chunk would advance `next_seq` without advancing `written`,
+        // so a peer could emit unlimited chunks and harvest unlimited acks from
+        // a transfer that can never complete.
+        let remaining = self.size - self.written;
+        let expected = remaining.min(FILE_TRANSFER_CHUNK_SIZE as u64);
+        if data.len() as u64 != expected {
             return Err(TransferError::Desync);
         }
         file.write_all(data)?;
@@ -366,9 +390,13 @@ impl Receiver {
         if !self.is_complete() {
             return Err(TransferError::Desync);
         }
-        if let Some(mut file) = self.file.take() {
+        // Flush through the borrow: taking the handle first would leave `Drop`
+        // with nothing to unlink if the flush fails, stranding a corrupt file
+        // that a failed transfer just reported as failed.
+        if let Some(file) = self.file.as_mut() {
             file.flush()?;
         }
+        self.file = None;
         Ok(self.path.clone())
     }
 }
@@ -440,6 +468,10 @@ mod tests {
             "CON",
             "nul.txt",
             "CoM1.log",
+            "CONIN$",
+            "conout$.txt",
+            "COM¹",
+            "lpt².txt",
         ] {
             assert!(checked_name(name).is_err(), "{name:?} should be rejected");
         }
@@ -509,6 +541,12 @@ mod tests {
         let suffixed = suffixed_name(&wide, 3);
         assert!(suffixed.len() <= MAX_NAME_BYTES);
         assert!(std::str::from_utf8(suffixed.as_bytes()).is_ok());
+
+        // A long *extension* blows the budget even when the stem is tiny.
+        let long_ext = format!("a.{}", "x".repeat(MAX_NAME_BYTES - 2));
+        assert_eq!(long_ext.len(), MAX_NAME_BYTES);
+        assert!(checked_name(&long_ext).is_ok());
+        assert!(suffixed_name(&long_ext, 1).len() <= MAX_NAME_BYTES);
     }
 
     #[test]
@@ -582,6 +620,17 @@ mod tests {
             receiver.write_chunk(0, &[0; 5]).expect_err("overrun"),
             TransferError::Desync
         ));
+        // An empty chunk is a desync, not a no-op: it would advance the
+        // sequence without advancing progress.
+        assert!(matches!(
+            receiver.write_chunk(0, &[]).expect_err("empty"),
+            TransferError::Desync
+        ));
+        // A short-but-nonempty chunk is equally wrong while bytes remain.
+        assert!(matches!(
+            receiver.write_chunk(0, &[1, 2]).expect_err("short"),
+            TransferError::Desync
+        ));
         receiver.write_chunk(0, &[1, 2, 3, 4]).expect("in order");
         assert!(receiver.is_complete());
     }
@@ -597,8 +646,12 @@ mod tests {
     fn dropping_an_incomplete_receiver_unlinks_the_partial_file() {
         let dir = tempdir("abort");
         let path = {
-            let mut receiver = Receiver::create(&dir, "a.bin", 8).expect("create");
-            receiver.write_chunk(0, &[1, 2, 3]).expect("partial write");
+            let size = FILE_TRANSFER_CHUNK_SIZE as u64 + 10;
+            let mut receiver = Receiver::create(&dir, "a.bin", size).expect("create");
+            receiver
+                .write_chunk(0, &vec![7u8; FILE_TRANSFER_CHUNK_SIZE])
+                .expect("first chunk");
+            assert!(!receiver.is_complete());
             receiver.path().to_path_buf()
         };
         assert!(!path.exists(), "partial file should be removed on abort");

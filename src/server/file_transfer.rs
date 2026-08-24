@@ -18,7 +18,10 @@ use super::headless::HeadlessServer;
 #[derive(Debug)]
 enum Stage {
     /// `FileTransferRequest` is out; the client has not announced its file yet.
-    AwaitingUpload,
+    /// The destination is captured here, not when the client answers: focus can
+    /// move during the round trip and the file must land in the pane the user
+    /// picked.
+    AwaitingUpload { dir: PathBuf },
     /// Writing bytes the client is sending up.
     Receiving(engine::Receiver),
     /// Reading bytes down to the client, waiting on the ack for `pending_seq`.
@@ -47,6 +50,10 @@ impl HeadlessServer {
         let mut needs_render = false;
 
         if std::mem::take(&mut self.app.state.request_file_transfer_cancel) {
+            // Input arrives in batches, so Enter and Esc can both land before
+            // this runs. Drop the start the cancel raced instead of beginning a
+            // transfer the user already abandoned.
+            self.app.state.request_file_transfer = None;
             self.abort_file_transfer(Some("cancelled".to_owned()));
             needs_render = true;
         }
@@ -74,11 +81,17 @@ impl HeadlessServer {
             FileTransferDirection::Upload => {
                 // The file is on the client, so ask for it and wait. The client
                 // resolves and validates the path on its own side.
+                let Some(dir) = self.focused_pane_cwd() else {
+                    self.finish_file_transfer_ui(Err(
+                        "the focused pane has no working directory".to_owned()
+                    ));
+                    return;
+                };
                 self.file_transfer = Some(ServerTransfer {
                     id,
                     client_id,
                     direction,
-                    stage: Stage::AwaitingUpload,
+                    stage: Stage::AwaitingUpload { dir },
                 });
                 self.send_to_client(
                     client_id,
@@ -201,18 +214,19 @@ impl HeadlessServer {
     ) -> bool {
         // Only a transfer this server asked for is accepted. Without this a
         // client could push an unprompted file into the focused pane's cwd.
-        if !self.file_transfer_matches(client_id, transfer_id, |stage| {
-            matches!(stage, Stage::AwaitingUpload)
-        }) {
-            self.reject_stray_transfer(client_id, transfer_id, "no such transfer");
-            return false;
-        }
-
-        let dir = match self.focused_pane_cwd() {
-            Some(dir) => dir,
-            None => {
-                self.fail_file_transfer("the focused pane has no working directory".to_owned());
-                return true;
+        let dir = match self.file_transfer.as_ref() {
+            Some(transfer) if transfer.client_id == client_id && transfer.id == transfer_id => {
+                match &transfer.stage {
+                    Stage::AwaitingUpload { dir } => dir.clone(),
+                    _ => {
+                        self.fail_file_transfer("transfer desynchronized".to_owned());
+                        return true;
+                    }
+                }
+            }
+            _ => {
+                self.reject_stray_transfer(client_id, transfer_id, "no such transfer");
+                return false;
             }
         };
 
@@ -241,11 +255,19 @@ impl HeadlessServer {
         seq: u32,
         data: Vec<u8>,
     ) -> bool {
-        if !self.file_transfer_matches(client_id, transfer_id, |stage| {
-            matches!(stage, Stage::Receiving(_))
-        }) {
-            self.reject_stray_transfer(client_id, transfer_id, "no such transfer");
-            return false;
+        match self.file_transfer.as_ref() {
+            Some(transfer) if transfer.client_id == client_id && transfer.id == transfer_id => {
+                if !matches!(transfer.stage, Stage::Receiving(_)) {
+                    // Right id, wrong stage. Answering the peer without clearing
+                    // our own slot would leave it free and us wedged.
+                    self.fail_file_transfer("transfer desynchronized".to_owned());
+                    return true;
+                }
+            }
+            _ => {
+                self.reject_stray_transfer(client_id, transfer_id, "no such transfer");
+                return false;
+            }
         }
 
         let written = {
@@ -344,8 +366,21 @@ impl HeadlessServer {
                 }
                 self.finish_file_transfer_ui(Ok(()));
             }
-            // An upload is only complete when the bytes are on disk here.
-            FileTransferDirection::Upload => self.complete_upload_if_done(),
+            // An upload is only complete when the bytes are on disk here. A
+            // peer claiming success early would otherwise leave the slot held
+            // and the popup spinning with no terminal state, and there is no
+            // timeout to rescue it.
+            FileTransferDirection::Upload => {
+                let complete = matches!(
+                    &transfer.stage,
+                    Stage::Receiving(receiver) if receiver.is_complete()
+                );
+                if complete {
+                    self.complete_upload_if_done();
+                } else {
+                    self.fail_file_transfer("transfer desynchronized".to_owned());
+                }
+            }
         }
         true
     }
@@ -364,6 +399,20 @@ impl HeadlessServer {
     /// Tears the transfer down locally and tells the peer, if it is still there.
     pub(super) fn abort_file_transfer(&mut self, reason: Option<String>) {
         let Some(transfer) = self.file_transfer.take() else {
+            // Nothing in flight, but a popup may still be waiting on a request
+            // that was cancelled before it ever started. Leaving it without an
+            // outcome would spin forever.
+            if self
+                .app
+                .state
+                .file_transfer
+                .as_ref()
+                .is_some_and(|state| state.outcome.is_none())
+            {
+                self.finish_file_transfer_ui(Err(
+                    reason.unwrap_or_else(|| "the transfer stopped".to_owned())
+                ));
+            }
             return;
         };
         // Dropping a `Receiver` unlinks its partial file.
@@ -425,19 +474,6 @@ impl HeadlessServer {
         }
     }
 
-    fn file_transfer_matches(
-        &self,
-        client_id: u64,
-        transfer_id: u64,
-        stage_ok: impl Fn(&Stage) -> bool,
-    ) -> bool {
-        self.file_transfer.as_ref().is_some_and(|transfer| {
-            transfer.client_id == client_id
-                && transfer.id == transfer_id
-                && stage_ok(&transfer.stage)
-        })
-    }
-
     /// Answers a message for a transfer this server does not know about, so the
     /// peer stops waiting instead of hanging on an ack that will never come.
     fn reject_stray_transfer(&mut self, client_id: u64, transfer_id: u64, reason: &str) {
@@ -453,6 +489,27 @@ impl HeadlessServer {
                 error: Some(reason.to_owned()),
             },
         );
+    }
+
+    /// Seeds an upload already past its request round trip, so tests can drive
+    /// the terminal paths without a live client to answer `FileTransferRequest`.
+    #[cfg(test)]
+    pub(super) fn begin_upload_for_test(&mut self, client_id: u64, dir: PathBuf) -> u64 {
+        let id = self.next_file_transfer_id();
+        self.app.state.file_transfer = Some(crate::app::state::FileTransferState {
+            direction: FileTransferDirection::Upload,
+            name: String::new(),
+            size: 0,
+            done: 0,
+            outcome: None,
+        });
+        self.file_transfer = Some(ServerTransfer {
+            id,
+            client_id,
+            direction: FileTransferDirection::Upload,
+            stage: Stage::AwaitingUpload { dir },
+        });
+        id
     }
 
     fn next_file_transfer_id(&mut self) -> u64 {
