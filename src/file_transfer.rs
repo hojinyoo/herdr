@@ -187,6 +187,12 @@ fn create_destination(dir: &Path, name: &str) -> Result<(PathBuf, fs::File), Tra
         } else {
             suffixed_name(name, attempt)
         };
+        // `name` was validated, but suffixing rebuilds it: the NAME_MAX clamp can
+        // cut inside an extension and leave a trailing space, which Win32 strips.
+        // Re-run the gate on what will actually be joined onto `dir`.
+        if is_unsafe_name(&candidate) {
+            continue;
+        }
         let mut options = fs::OpenOptions::new();
         options.write(true).create_new(true);
         restrict_file_options(&mut options);
@@ -523,6 +529,28 @@ mod tests {
         // `.gitignore` is all stem, so the leading dot must survive.
         assert_eq!(suffixed_name(".gitignore", 1), ".gitignore-1");
         assert_eq!(suffixed_name("archive.tar.gz", 1), "archive.tar-1.gz");
+    }
+
+    #[test]
+    fn a_suffixed_candidate_is_revalidated_before_use() {
+        // `checked_name` passes a 255-byte name whose extension is mostly spaces;
+        // suffixing then clamps it and can leave a trailing space, which the
+        // rejection table exists to block.
+        let hostile = format!("a.{}{}", "x".repeat(MAX_NAME_BYTES - 4), " b");
+        if checked_name(&hostile).is_ok() {
+            let suffixed = suffixed_name(&hostile, 1);
+            if is_unsafe_name(&suffixed) {
+                let dir = tempdir("revalidate");
+                // The unsafe candidate must be skipped, not written.
+                let (path, _f) = create_destination(&dir, &hostile).expect("first");
+                assert!(!path.file_name().unwrap().to_str().unwrap().ends_with(' '));
+            }
+        }
+        // The invariant that matters regardless of the crafted case above.
+        for attempt in 1..4u32 {
+            let candidate = suffixed_name("notes.txt", attempt);
+            assert!(!is_unsafe_name(&candidate), "{candidate:?} must stay safe");
+        }
     }
 
     #[test]

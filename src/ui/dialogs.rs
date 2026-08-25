@@ -166,7 +166,10 @@ pub(crate) fn file_transfer_button_rects(inner: Rect) -> (Rect, Rect) {
             },
         ],
         2,
-        3,
+        // One row below the sibling modals: a wrapped failure message needs two
+        // rows above the buttons, and the buttons are drawn last, so a shorter
+        // offset would overprint the second line of the error.
+        4,
     );
     (rects[0], rects[1])
 }
@@ -289,13 +292,19 @@ pub(super) fn render_file_transfer_progress(app: &AppState, frame: &mut Frame, a
         rows[1],
     );
 
+    let (_, dismiss_rect) = file_transfer_button_rects(inner);
+
     match transfer.outcome.as_ref() {
         Some(Err(error)) => {
+            // Derived from the button row rather than fixed at 2: the buttons
+            // are drawn after this, so anything that reaches their row is
+            // overprinted mid-sentence.
+            let height = dismiss_rect.y.saturating_sub(rows[2].y).max(1);
             frame.render_widget(
                 Paragraph::new(error.as_str())
                     .style(Style::default().fg(app.palette.red))
                     .wrap(Wrap { trim: true }),
-                Rect::new(rows[2].x, rows[2].y, rows[2].width, 2),
+                Rect::new(rows[2].x, rows[2].y, rows[2].width, height),
             );
         }
         outcome => {
@@ -320,7 +329,6 @@ pub(super) fn render_file_transfer_progress(app: &AppState, frame: &mut Frame, a
         }
     }
 
-    let (_, dismiss_rect) = file_transfer_button_rects(inner);
     render_action_button(
         frame,
         dismiss_rect,
@@ -991,8 +999,67 @@ mod tests {
     };
 
     use super::{
-        confirm_close_overlay_text, render_new_linked_worktree_overlay, render_rename_overlay,
+        confirm_close_overlay_text, render_file_transfer_progress,
+        render_new_linked_worktree_overlay, render_rename_overlay,
     };
+
+    /// The failure message is the only thing the popup has to say when a
+    /// transfer fails, and the action buttons are drawn after it. A fixed-height
+    /// error rect reached their row and they overprinted the second line
+    /// mid-sentence.
+    #[test]
+    fn a_wrapped_transfer_failure_is_not_overprinted_by_the_button_row() {
+        // Long enough that the wrapped second line reaches the centred buttons.
+        // `NoFreeName` quotes the file name, so any ordinary long name gets
+        // there; so does any failure string the peer chose.
+        let error = format!(
+            "could not find a free name for {} at the destination",
+            "quarterly-report-final-v2".repeat(2)
+        );
+        let error = error.as_str();
+        let mut app = AppState::test_new();
+        app.mode = Mode::FileTransferProgress;
+        app.file_transfer = Some(crate::app::state::FileTransferState {
+            direction: crate::app::state::FileTransferDirection::Upload,
+            name: "huge.bin".to_owned(),
+            size: 268_435_457,
+            done: 0,
+            outcome: Some(Err(error.to_owned())),
+        });
+
+        let area = Rect::new(0, 0, 100, 30);
+        let mut terminal =
+            Terminal::new(TestBackend::new(area.width, area.height)).expect("test terminal");
+        terminal
+            .draw(|frame| render_file_transfer_progress(&app, frame, area))
+            .expect("progress popup should render");
+
+        let buffer = terminal.backend().buffer().clone();
+        let popup = super::centered_popup_rect(
+            area,
+            super::FILE_TRANSFER_POPUP_WIDTH,
+            super::FILE_TRANSFER_POPUP_HEIGHT,
+        )
+        .expect("popup fits");
+        let inner = Rect::new(popup.x + 1, popup.y + 1, popup.width - 2, popup.height - 2);
+        let (_, dismiss) = super::file_transfer_button_rects(inner);
+
+        // The button is drawn last, so anything else that reaches its row is
+        // stamped through mid-word. Nothing but the button may live there.
+        let spill: String = (inner.x..inner.right())
+            .filter(|x| !(dismiss.x..dismiss.right()).contains(x))
+            .map(|x| buffer[(x, dismiss.y)].symbol())
+            .collect();
+        assert!(
+            spill.trim().is_empty(),
+            "error text reached the button row: {spill:?}"
+        );
+
+        let button: String = (dismiss.x..dismiss.right())
+            .map(|x| buffer[(x, dismiss.y)].symbol())
+            .collect();
+        assert!(button.contains("close"), "dismiss button should render");
+    }
 
     #[test]
     fn confirm_close_text_uses_live_workspace_cwd_label() {

@@ -304,7 +304,7 @@ impl HeadlessServer {
         transfer_id: u64,
         seq: u32,
     ) -> bool {
-        let released = {
+        {
             let Some(transfer) = self.file_transfer.as_mut() else {
                 return false;
             };
@@ -325,11 +325,8 @@ impl HeadlessServer {
                 return false;
             }
             *pending_seq = None;
-            true
-        };
-        if released {
-            self.pump_download();
         }
+        self.pump_download();
         true
     }
 
@@ -356,8 +353,19 @@ impl HeadlessServer {
 
         match transfer.direction {
             // The client wrote the file; its `ok` is the verdict, and its
-            // `saved_name` is the only place the suffixed name exists.
+            // `saved_name` is the only place the suffixed name exists. It is
+            // still only allowed to claim success for bytes this side actually
+            // sent — otherwise a peer answering the announcement makes the
+            // popup report "done" for a file that got nothing.
             FileTransferDirection::Download => {
+                let drained = matches!(
+                    &transfer.stage,
+                    Stage::Sending { sender, .. } if sender.sent() == sender.size()
+                );
+                if !drained {
+                    self.fail_file_transfer("transfer desynchronized".to_owned());
+                    return true;
+                }
                 self.file_transfer = None;
                 if let (Some(state), Some(saved_name)) =
                     (self.app.state.file_transfer.as_mut(), saved_name)
@@ -508,6 +516,35 @@ impl HeadlessServer {
             client_id,
             direction: FileTransferDirection::Upload,
             stage: Stage::AwaitingUpload { dir },
+        });
+        id
+    }
+
+    /// Seeds a download already announced to the client, so tests can drive the
+    /// terminal paths without a live client to ack chunks.
+    #[cfg(test)]
+    pub(super) fn begin_download_for_test(
+        &mut self,
+        client_id: u64,
+        source: &std::path::Path,
+    ) -> u64 {
+        let id = self.next_file_transfer_id();
+        let (file, name, size) = engine::open_source(source).expect("test download source");
+        self.app.state.file_transfer = Some(crate::app::state::FileTransferState {
+            direction: FileTransferDirection::Download,
+            name,
+            size,
+            done: 0,
+            outcome: None,
+        });
+        self.file_transfer = Some(ServerTransfer {
+            id,
+            client_id,
+            direction: FileTransferDirection::Download,
+            stage: Stage::Sending {
+                sender: engine::Sender::new(file, size),
+                pending_seq: None,
+            },
         });
         id
     }

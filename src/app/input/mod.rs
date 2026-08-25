@@ -740,9 +740,11 @@ pub(crate) fn is_modal_paste_shortcut(key: &KeyEvent) -> bool {
 
 pub(crate) fn modal_paste_target_active(state: &AppState) -> bool {
     match state.mode {
-        Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane | Mode::NewLinkedWorktree => {
-            true
-        }
+        Mode::RenameWorkspace
+        | Mode::RenameTab
+        | Mode::RenamePane
+        | Mode::NewLinkedWorktree
+        | Mode::FileTransferPath => true,
         Mode::OpenExistingWorktree => state
             .worktree_open
             .as_ref()
@@ -1054,5 +1056,11 @@ mod tests {
 
         state.mode = Mode::ConfirmClose;
         assert!(!modal_paste_target_active(&state));
+
+        // The transfer prompt takes a file path, which is the value people
+        // paste most; without this the shortcut falls through to the mode's own
+        // key handler and Cmd+V types a literal "v" into the field.
+        state.mode = Mode::FileTransferPath;
+        assert!(modal_paste_target_active(&state));
     }
 }

@@ -6052,13 +6052,12 @@ mod tests {
         assert_eq!(outcome.is_ok(), expect_ok, "outcome was {outcome:?}");
     }
 
-    fn file_transfer_test_server() -> (HeadlessServer, PathBuf) {
+    /// `tag` must be unique per test: these run in the same process under
+    /// `cargo test`, and a shared directory would let one test's cleanup delete
+    /// another's destination mid-write.
+    fn file_transfer_test_server(tag: &str) -> (HeadlessServer, PathBuf) {
         let (server, _control_rx) = window_title_test_server();
-        let dir = std::env::temp_dir().join(format!(
-            "herdr-ft-{}-{}",
-            std::process::id(),
-            server.app.state.workspaces.len()
-        ));
+        let dir = std::env::temp_dir().join(format!("herdr-ft-{}-{tag}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).expect("transfer dir");
         (server, dir)
@@ -6066,7 +6065,7 @@ mod tests {
 
     #[test]
     fn upload_completing_normally_releases_the_slot() {
-        let (mut server, dir) = file_transfer_test_server();
+        let (mut server, dir) = file_transfer_test_server("complete");
         let id = server.begin_upload_for_test(1, dir.clone());
 
         server.handle_client_file_transfer_start(1, id, "a.txt".to_owned(), 4);
@@ -6079,7 +6078,7 @@ mod tests {
 
     #[test]
     fn upload_claiming_success_before_the_bytes_arrive_is_refused() {
-        let (mut server, dir) = file_transfer_test_server();
+        let (mut server, dir) = file_transfer_test_server("early-success");
         let id = server.begin_upload_for_test(1, dir.clone());
         server.handle_client_file_transfer_start(1, id, "a.txt".to_owned(), 1024);
 
@@ -6097,7 +6096,7 @@ mod tests {
 
     #[test]
     fn upload_desync_releases_the_slot() {
-        let (mut server, dir) = file_transfer_test_server();
+        let (mut server, dir) = file_transfer_test_server("desync");
         let id = server.begin_upload_for_test(1, dir.clone());
         server.handle_client_file_transfer_start(1, id, "a.txt".to_owned(), 4);
 
@@ -6111,7 +6110,7 @@ mod tests {
 
     #[test]
     fn client_disconnect_mid_transfer_releases_the_slot() {
-        let (mut server, dir) = file_transfer_test_server();
+        let (mut server, dir) = file_transfer_test_server("disconnect");
         let id = server.begin_upload_for_test(1, dir.clone());
         server.handle_client_file_transfer_start(1, id, "a.txt".to_owned(), 1024);
 
@@ -6123,8 +6122,24 @@ mod tests {
     }
 
     #[test]
+    fn download_claiming_success_before_the_bytes_are_sent_is_refused() {
+        let (mut server, dir) = file_transfer_test_server("download-early-success");
+        let src = dir.join("out.bin");
+        fs::write(&src, vec![1u8; 8]).expect("source");
+        let id = server.begin_download_for_test(1, &src);
+
+        // Peer answers the announcement with success before a single chunk has
+        // gone out. Without the drain check the popup reported "done" for a
+        // file the client never received.
+        server.handle_client_file_transfer_end(1, id, true, None, Some("out.bin".to_owned()));
+
+        assert_file_transfer_settled(&server, false);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn a_start_for_an_unknown_transfer_leaves_the_live_one_alone() {
-        let (mut server, dir) = file_transfer_test_server();
+        let (mut server, dir) = file_transfer_test_server("unknown-id");
         let id = server.begin_upload_for_test(1, dir.clone());
 
         // An unprompted id must not displace the transfer in flight, and must

@@ -159,6 +159,19 @@ pub(super) fn apply_global_menu_action(state: &mut AppState, action: GlobalMenuA
 /// Opens the path prompt. The transfer itself is server state; this only
 /// collects the path and hands it over through `request_file_transfer`.
 pub(super) fn open_file_transfer_prompt(state: &mut AppState, direction: FileTransferDirection) {
+    // A running transfer owns the popup. Anything that leaves this mode without
+    // ending the transfer — a `tab.create` or `workspace.switch` from the API
+    // resets `mode` to `Terminal` — would otherwise strip the user of the only
+    // cancel affordance, and the live transfer would keep writing its progress
+    // and its outcome into the replacement popup.
+    if state
+        .file_transfer
+        .as_ref()
+        .is_some_and(|transfer| !transfer.finished())
+    {
+        state.mode = Mode::FileTransferProgress;
+        return;
+    }
     state.name_input.clear();
     state.name_input_replace_on_type = false;
     state.file_transfer = Some(FileTransferState {
@@ -208,18 +221,15 @@ fn request_file_transfer_stop(state: &mut AppState) {
     close_file_transfer(state);
 }
 
+/// The path field is the shared `name_input`, so editing routes through the
+/// same handler every other text modal uses. Hand-rolling it dropped word
+/// delete and let `alt`/`super` chords type their letter into the path.
 pub(crate) fn handle_file_transfer_path_key(state: &mut AppState, key: KeyEvent) {
-    match key.code {
-        KeyCode::Esc => close_file_transfer(state),
-        KeyCode::Enter => confirm_file_transfer_path(state),
-        KeyCode::Backspace => delete_rename_input_char(state),
-        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            clear_rename_input(state)
-        }
-        KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-            insert_rename_input_text(state, &ch.to_string())
-        }
-        _ => {}
+    match modal_action_from_key(&key, RENAME_ACTIONS) {
+        Some(ModalAction::Save) => confirm_file_transfer_path(state),
+        Some(ModalAction::Cancel) => close_file_transfer(state),
+        Some(ModalAction::Clear) => clear_rename_input(state),
+        _ => handle_rename_edit_key(state, key),
     }
 }
 
@@ -2581,6 +2591,47 @@ mod tests {
         let transfer = state.file_transfer.as_ref().expect("popup state");
         assert_eq!(transfer.name, "notes.txt");
         assert!(!transfer.finished());
+    }
+
+    #[test]
+    fn the_path_field_gets_the_shared_text_editing_keys() {
+        let mut state = AppState::test_new();
+        open_file_transfer_prompt(&mut state, FileTransferDirection::Upload);
+        typed(&mut state, "logs/out.txt");
+
+        handle_file_transfer_path_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL),
+        );
+        assert_eq!(state.name_input, "logs/out.");
+
+        // A `super` chord is a shortcut, not text: the hand-rolled handler used
+        // to type its letter into the path.
+        handle_file_transfer_path_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('v'), KeyModifiers::SUPER),
+        );
+        assert_eq!(state.name_input, "logs/out.");
+    }
+
+    #[test]
+    fn reopening_the_prompt_mid_transfer_returns_to_the_running_one() {
+        let mut state = AppState::test_new();
+        open_file_transfer_prompt(&mut state, FileTransferDirection::Upload);
+        typed(&mut state, "big.bin");
+        handle_file_transfer_path_key(&mut state, key(KeyCode::Enter));
+        state.file_transfer.as_mut().expect("popup state").done = 4;
+
+        // The API resets `mode` to Terminal for unrelated reasons (`tab.create`,
+        // `workspace.switch`). Reopening must hand the running transfer's popup
+        // back rather than clobber the only way to cancel it.
+        state.mode = Mode::Terminal;
+        open_file_transfer_prompt(&mut state, FileTransferDirection::Download);
+
+        assert_eq!(state.mode, Mode::FileTransferProgress);
+        let transfer = state.file_transfer.as_ref().expect("popup state");
+        assert_eq!(transfer.direction, FileTransferDirection::Upload);
+        assert_eq!(transfer.done, 4);
     }
 
     #[test]
