@@ -1611,6 +1611,10 @@ impl HeadlessServer {
     }
 
     fn remove_client(&mut self, client_id: u64) -> bool {
+        // Every removal path lands here — `ClientDetach` reaches it without going
+        // through the `ClientDisconnected` arm, so aborting only there left a
+        // clean detach holding the single transfer slot for the session.
+        self.abort_file_transfer_for_client(client_id);
         self.retire_direct_graphics_for_client(client_id);
         let was_foreground = self.foreground_client_id == Some(client_id);
         self.app.clear_input_source(client_id);
@@ -3352,7 +3356,6 @@ impl HeadlessServer {
             }
             ServerEvent::ClientDisconnected { client_id } => {
                 info!(client_id, "client disconnected");
-                self.abort_file_transfer_for_client(client_id);
                 self.remove_client_and_resize_if_needed(client_id);
                 true
             }
@@ -6151,6 +6154,250 @@ mod tests {
             "live transfer was displaced"
         );
         assert!(!dir.join("evil.txt").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ---- both-ends protocol harness ----
+    //
+    // Drives the real server state machine against the real client state machine
+    // over the real wire types, in-process. This is the only coverage that
+    // exercises both halves against each other: the unit tests on either side
+    // assert what that side does, not that the two agree.
+
+    /// Pumps messages between the two halves until neither has anything to say.
+    /// Returns the number of round trips, so a test can assert chunking actually
+    /// happened rather than the file arriving in one shot.
+    fn pump_protocol(
+        server: &mut HeadlessServer,
+        client_slot: &mut Option<crate::client::file_transfer::ClientTransfer>,
+        control_rx: &std::sync::mpsc::Receiver<Vec<u8>>,
+        client_id: u64,
+    ) -> usize {
+        let mut rounds = 0;
+        // Bounded so a protocol bug fails the test instead of hanging it.
+        for _ in 0..4096 {
+            let Ok(bytes) = control_rx.recv_timeout(Duration::from_millis(200)) else {
+                break;
+            };
+            let replies = match read_server_message(bytes) {
+                ServerMessage::FileTransferRequest { transfer_id, path } => {
+                    crate::client::file_transfer::begin_upload(client_slot, transfer_id, &path)
+                }
+                ServerMessage::FileTransferStart {
+                    transfer_id,
+                    name,
+                    size,
+                } => crate::client::file_transfer::begin_download(
+                    client_slot,
+                    transfer_id,
+                    &name,
+                    size,
+                ),
+                ServerMessage::FileTransferChunk {
+                    transfer_id,
+                    seq,
+                    data,
+                } => {
+                    crate::client::file_transfer::handle_chunk(client_slot, transfer_id, seq, &data)
+                }
+                ServerMessage::FileTransferAck { transfer_id, seq } => {
+                    crate::client::file_transfer::handle_ack(client_slot, transfer_id, seq)
+                }
+                ServerMessage::FileTransferEnd { transfer_id, .. } => {
+                    crate::client::file_transfer::handle_end(client_slot, transfer_id);
+                    Vec::new()
+                }
+                _ => continue,
+            };
+            rounds += 1;
+            for reply in replies {
+                match reply {
+                    crate::protocol::ClientMessage::FileTransferStart {
+                        transfer_id,
+                        name,
+                        size,
+                    } => {
+                        server.handle_client_file_transfer_start(
+                            client_id,
+                            transfer_id,
+                            name,
+                            size,
+                        );
+                    }
+                    crate::protocol::ClientMessage::FileTransferChunk {
+                        transfer_id,
+                        seq,
+                        data,
+                    } => {
+                        server.handle_client_file_transfer_chunk(client_id, transfer_id, seq, data);
+                    }
+                    crate::protocol::ClientMessage::FileTransferAck { transfer_id, seq } => {
+                        server.handle_client_file_transfer_ack(client_id, transfer_id, seq);
+                    }
+                    crate::protocol::ClientMessage::FileTransferEnd {
+                        transfer_id,
+                        ok,
+                        error,
+                        saved_name,
+                    } => {
+                        server.handle_client_file_transfer_end(
+                            client_id,
+                            transfer_id,
+                            ok,
+                            error,
+                            saved_name,
+                        );
+                    }
+                    _ => {}
+                }
+            }
+        }
+        rounds
+    }
+
+    fn protocol_test_env(
+        tag: &str,
+    ) -> (HeadlessServer, std::sync::mpsc::Receiver<Vec<u8>>, PathBuf) {
+        let (server, control_rx) = window_title_test_server();
+        let dir = std::env::temp_dir().join(format!(
+            "herdr-proto-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("protocol test dir");
+        (server, control_rx, dir)
+    }
+
+    #[test]
+    fn end_to_end_upload_moves_the_bytes_and_settles_both_halves() {
+        let (mut server, control_rx, dir) = protocol_test_env("upload");
+        let src_dir = dir.join("src");
+        let dst_dir = dir.join("dst");
+        fs::create_dir_all(&src_dir).expect("src");
+        fs::create_dir_all(&dst_dir).expect("dst");
+        // Three chunks, so the ack loop has to actually turn over.
+        let payload: Vec<u8> = (0..crate::protocol::FILE_TRANSFER_CHUNK_SIZE * 2 + 17)
+            .map(|i| (i % 251) as u8)
+            .collect();
+        let src = src_dir.join("payload.bin");
+        fs::write(&src, &payload).expect("write source");
+
+        let id = server.begin_upload_for_test(1, dst_dir.clone());
+        server.send_to_client(
+            1,
+            ServerMessage::FileTransferRequest {
+                transfer_id: id,
+                path: src.to_string_lossy().into_owned(),
+            },
+        );
+
+        let mut client_slot = None;
+        let rounds = pump_protocol(&mut server, &mut client_slot, &control_rx, 1);
+
+        assert!(rounds >= 3, "expected a multi-round ack loop, got {rounds}");
+        assert!(client_slot.is_none(), "client slot should be released");
+        assert_file_transfer_settled(&server, true);
+        assert_eq!(
+            fs::read(dst_dir.join("payload.bin")).expect("delivered"),
+            payload,
+            "the bytes that arrived must equal the bytes that were sent"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn end_to_end_upload_suffixes_instead_of_overwriting() {
+        let (mut server, control_rx, dir) = protocol_test_env("suffix");
+        let src_dir = dir.join("src");
+        let dst_dir = dir.join("dst");
+        fs::create_dir_all(&src_dir).expect("src");
+        fs::create_dir_all(&dst_dir).expect("dst");
+        fs::write(src_dir.join("a.txt"), b"second").expect("src file");
+        fs::write(dst_dir.join("a.txt"), b"original").expect("existing");
+
+        let id = server.begin_upload_for_test(1, dst_dir.clone());
+        server.send_to_client(
+            1,
+            ServerMessage::FileTransferRequest {
+                transfer_id: id,
+                path: src_dir.join("a.txt").to_string_lossy().into_owned(),
+            },
+        );
+        pump_protocol(&mut server, &mut None, &control_rx, 1);
+
+        assert_file_transfer_settled(&server, true);
+        assert_eq!(
+            fs::read(dst_dir.join("a.txt")).expect("original"),
+            b"original",
+            "the existing file must not be touched"
+        );
+        assert_eq!(
+            fs::read(dst_dir.join("a-1.txt")).expect("suffixed"),
+            b"second"
+        );
+        // The popup must name the file that actually exists, not the announced one.
+        assert_eq!(
+            server.app.state.file_transfer.as_ref().expect("popup").name,
+            "a-1.txt"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn end_to_end_upload_of_a_missing_file_settles_instead_of_hanging() {
+        let (mut server, control_rx, dir) = protocol_test_env("missing");
+        let id = server.begin_upload_for_test(1, dir.clone());
+        server.send_to_client(
+            1,
+            ServerMessage::FileTransferRequest {
+                transfer_id: id,
+                path: dir
+                    .join("does-not-exist.bin")
+                    .to_string_lossy()
+                    .into_owned(),
+            },
+        );
+
+        let mut client_slot = None;
+        pump_protocol(&mut server, &mut client_slot, &control_rx, 1);
+
+        assert!(client_slot.is_none());
+        assert_file_transfer_settled(&server, false);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_clean_detach_mid_transfer_releases_the_slot() {
+        // `ClientDetach` reaches `remove_client` without going through the
+        // `ClientDisconnected` arm; aborting only there left the slot held for
+        // the life of the session, refusing every later transfer.
+        let (mut server, dir) = file_transfer_test_server("detach");
+        let id = server.begin_upload_for_test(1, dir.clone());
+        server.handle_client_file_transfer_start(1, id, "a.bin".to_owned(), 1024);
+
+        assert!(server.handle_server_event(ServerEvent::ClientDetach { client_id: 1 }));
+
+        assert_file_transfer_settled(&server, false);
+        assert!(!dir.join("a.bin").exists(), "partial must be unlinked");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_stalled_transfer_is_reclaimed_instead_of_holding_the_slot_forever() {
+        let (mut server, dir) = file_transfer_test_server("stall");
+        let id = server.begin_upload_for_test(1, dir.clone());
+        server.handle_client_file_transfer_start(1, id, "a.bin".to_owned(), 1024);
+
+        // Still fresh: the drain must not reclaim it.
+        assert!(!server.drain_file_transfer_requests());
+        assert!(server.file_transfer.is_some());
+
+        server.expire_file_transfer_for_test();
+        assert!(server.drain_file_transfer_requests());
+
+        assert_file_transfer_settled(&server, false);
+        assert!(!dir.join("a.bin").exists());
         let _ = fs::remove_dir_all(&dir);
     }
 

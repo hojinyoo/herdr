@@ -55,7 +55,16 @@ the destination, the new one is saved with a numbered suffix (`notes.txt` ->
 cancel a running transfer; a partially written file is removed.
 
 One transfer runs at a time, files are limited to 256 MiB, and directories are
-not supported yet. Transfers acknowledge each 256 KiB chunk before sending the
+not supported yet. A transfer that makes no progress for 60 seconds is
+abandoned so it cannot hold the slot indefinitely.
+
+:::caution[Trust]
+Sending is driven by the Herdr server: it asks your client for the file at the
+path you typed. A compromised remote server can therefore ask for a path you did
+not choose, and your client will send it. Before this feature the server could
+not read your local filesystem at all. Only use `--remote` with servers you
+trust with your local files.
+::: Transfers acknowledge each 256 KiB chunk before sending the
 next, so throughput is bounded by round-trip latency: expect roughly 20s for a
 256 MiB file on a fast link and appreciably longer on a distant one. There is no
 resume, so a dropped connection restarts the transfer.

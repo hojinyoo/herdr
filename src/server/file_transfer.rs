@@ -5,6 +5,7 @@
 //! This module is only the state machine and its wire plumbing.
 
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use tracing::{debug, warn};
 
@@ -31,6 +32,13 @@ enum Stage {
     },
 }
 
+/// How long a transfer may make no progress before the server reclaims the slot.
+///
+/// Without this a peer that stops answering without closing its socket holds the
+/// single transfer slot for the life of the session, and every later transfer is
+/// refused. Stop-and-wait means an honest peer refreshes this every round trip.
+const FILE_TRANSFER_STALL_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// The one transfer this server will run at a time.
 #[derive(Debug)]
 pub(super) struct ServerTransfer {
@@ -41,6 +49,8 @@ pub(super) struct ServerTransfer {
     client_id: u64,
     direction: FileTransferDirection,
     stage: Stage,
+    /// Bumped on every message from the peer; drives the stall timeout.
+    last_progress: Instant,
 }
 
 impl HeadlessServer {
@@ -48,6 +58,15 @@ impl HeadlessServer {
     /// other `request_*` drains.
     pub(super) fn drain_file_transfer_requests(&mut self) -> bool {
         let mut needs_render = false;
+
+        if self
+            .file_transfer
+            .as_ref()
+            .is_some_and(|transfer| transfer.last_progress.elapsed() >= FILE_TRANSFER_STALL_TIMEOUT)
+        {
+            self.fail_file_transfer("the transfer stalled and was abandoned".to_owned());
+            needs_render = true;
+        }
 
         if std::mem::take(&mut self.app.state.request_file_transfer_cancel) {
             // Input arrives in batches, so Enter and Esc can both land before
@@ -92,6 +111,7 @@ impl HeadlessServer {
                     client_id,
                     direction,
                     stage: Stage::AwaitingUpload { dir },
+                    last_progress: Instant::now(),
                 });
                 self.send_to_client(
                     client_id,
@@ -112,6 +132,7 @@ impl HeadlessServer {
                             sender,
                             pending_seq: None,
                         },
+                        last_progress: Instant::now(),
                     });
                     if let Some(transfer) = self.app.state.file_transfer.as_mut() {
                         transfer.name = name.clone();
@@ -176,7 +197,9 @@ impl HeadlessServer {
         match sender.next_chunk() {
             Ok(Some((seq, data))) => {
                 *pending_seq = Some(seq);
-                let sent = sender.sent();
+                // Progress is what the peer has acknowledged, not what was handed
+                // to the socket: reporting `sent` shows 100% a round trip early.
+                let acked = sender.sent().saturating_sub(data.len() as u64);
                 self.send_to_client(
                     client_id,
                     ServerMessage::FileTransferChunk {
@@ -186,7 +209,7 @@ impl HeadlessServer {
                     },
                 );
                 if let Some(state) = self.app.state.file_transfer.as_mut() {
-                    state.done = sent;
+                    state.done = acked;
                 }
             }
             Ok(None) => {
@@ -248,6 +271,15 @@ impl HeadlessServer {
         true
     }
 
+    /// Records peer liveness for the stall timeout.
+    fn note_transfer_progress(&mut self, client_id: u64, transfer_id: u64) {
+        if let Some(transfer) = self.file_transfer.as_mut() {
+            if transfer.client_id == client_id && transfer.id == transfer_id {
+                transfer.last_progress = Instant::now();
+            }
+        }
+    }
+
     pub(super) fn handle_client_file_transfer_chunk(
         &mut self,
         client_id: u64,
@@ -255,6 +287,7 @@ impl HeadlessServer {
         seq: u32,
         data: Vec<u8>,
     ) -> bool {
+        self.note_transfer_progress(client_id, transfer_id);
         match self.file_transfer.as_ref() {
             Some(transfer) if transfer.client_id == client_id && transfer.id == transfer_id => {
                 if !matches!(transfer.stage, Stage::Receiving(_)) {
@@ -370,7 +403,8 @@ impl HeadlessServer {
                 if let (Some(state), Some(saved_name)) =
                     (self.app.state.file_transfer.as_mut(), saved_name)
                 {
-                    state.name = saved_name;
+                    // Peer-supplied; bound it before it reaches the popup.
+                    state.name = crate::file_transfer::display_name(&saved_name);
                 }
                 self.finish_file_transfer_ui(Ok(()));
             }
@@ -516,6 +550,7 @@ impl HeadlessServer {
             client_id,
             direction: FileTransferDirection::Upload,
             stage: Stage::AwaitingUpload { dir },
+            last_progress: Instant::now(),
         });
         id
     }
@@ -541,12 +576,22 @@ impl HeadlessServer {
             id,
             client_id,
             direction: FileTransferDirection::Download,
+            last_progress: Instant::now(),
             stage: Stage::Sending {
                 sender: engine::Sender::new(file, size),
                 pending_seq: None,
             },
         });
         id
+    }
+
+    /// Ages the in-flight transfer past the stall deadline so a test can assert
+    /// reclamation without sleeping.
+    #[cfg(test)]
+    pub(super) fn expire_file_transfer_for_test(&mut self) {
+        if let Some(transfer) = self.file_transfer.as_mut() {
+            transfer.last_progress = Instant::now() - FILE_TRANSFER_STALL_TIMEOUT;
+        }
     }
 
     fn next_file_transfer_id(&mut self) -> u64 {

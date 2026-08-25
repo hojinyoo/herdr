@@ -33,6 +33,8 @@ pub(crate) enum TransferError {
     },
     /// The peer sent a chunk out of order, or more bytes than it announced.
     Desync,
+    /// The download directory cannot be resolved because HOME is unset.
+    NoHome,
     Io(io::Error),
 }
 
@@ -52,6 +54,10 @@ impl std::fmt::Display for TransferError {
                 )
             }
             Self::Desync => write!(f, "transfer desynchronized"),
+            Self::NoHome => write!(
+                f,
+                "cannot resolve the download directory: HOME is unset and remote.file_transfer_dir is not absolute"
+            ),
             Self::Io(err) => write!(f, "{err}"),
         }
     }
@@ -416,6 +422,12 @@ impl Drop for Receiver {
             let _ = fs::remove_file(&self.path);
         }
     }
+}
+
+/// Bounds a peer-supplied name before it reaches a rendered surface. Ratatui
+/// filters control characters, so this is about length, not injection.
+pub(crate) fn display_name(name: &str) -> String {
+    truncate_on_char_boundary(name, MAX_NAME_BYTES).to_owned()
 }
 
 /// Resolves a user-typed source path against the pane's working directory.

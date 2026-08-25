@@ -14,7 +14,7 @@
 
 #[cfg(unix)]
 mod direct_graphics;
-mod file_transfer;
+pub(crate) mod file_transfer;
 mod input;
 
 use std::collections::HashSet;

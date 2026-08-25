@@ -14,7 +14,7 @@ use crate::protocol::ClientMessage;
 
 /// The one transfer this client will run at a time.
 #[derive(Debug)]
-pub(super) enum ClientTransfer {
+pub(crate) enum ClientTransfer {
     /// Uploading: waiting for the ack that releases `pending_seq + 1`.
     Sending {
         id: u64,
@@ -34,7 +34,7 @@ impl ClientTransfer {
 }
 
 /// What to write back to the server after handling one message.
-pub(super) type Replies = Vec<ClientMessage>;
+pub(crate) type Replies = Vec<ClientMessage>;
 
 fn failure(transfer_id: u64, err: &TransferError) -> ClientMessage {
     ClientMessage::FileTransferEnd {
@@ -68,10 +68,21 @@ fn download_dir() -> PathBuf {
     crate::worktree::expand_tilde_path(&configured)
 }
 
+/// `expand_tilde_path` returns the input verbatim when HOME/USERPROFILE is unset,
+/// which would otherwise make `create_dir_all` build a directory literally named
+/// `~` under whatever the client's cwd happens to be.
+fn usable_download_dir() -> Result<PathBuf, TransferError> {
+    let dir = download_dir();
+    if dir.starts_with("~") {
+        return Err(TransferError::NoHome);
+    }
+    Ok(dir)
+}
+
 /// Server asked for a client-local file (upload). Relative paths resolve against
 /// this process's working directory, the way a shell would read what the user
 /// typed on their own machine.
-pub(super) fn begin_upload(
+pub(crate) fn begin_upload(
     slot: &mut Option<ClientTransfer>,
     transfer_id: u64,
     path: &str,
@@ -123,7 +134,7 @@ pub(super) fn begin_upload(
 }
 
 /// Server announced a file it is about to send (download).
-pub(super) fn begin_download(
+pub(crate) fn begin_download(
     slot: &mut Option<ClientTransfer>,
     transfer_id: u64,
     name: &str,
@@ -134,7 +145,11 @@ pub(super) fn begin_download(
     }
     // `Receiver::create` runs `checked_name`, so a hostile or buggy server
     // cannot steer this outside `download_dir`.
-    match engine::Receiver::create(&download_dir(), name, size) {
+    let dir = match usable_download_dir() {
+        Ok(dir) => dir,
+        Err(err) => return vec![failure(transfer_id, &err)],
+    };
+    match engine::Receiver::create(&dir, name, size) {
         Ok(receiver) => {
             if receiver.is_complete() {
                 return finish_download(receiver, transfer_id);
@@ -152,7 +167,7 @@ pub(super) fn begin_download(
     }
 }
 
-pub(super) fn handle_chunk(
+pub(crate) fn handle_chunk(
     slot: &mut Option<ClientTransfer>,
     transfer_id: u64,
     seq: u32,
@@ -198,7 +213,7 @@ fn finish_download(receiver: engine::Receiver, transfer_id: u64) -> Replies {
     }
 }
 
-pub(super) fn handle_ack(slot: &mut Option<ClientTransfer>, transfer_id: u64, seq: u32) -> Replies {
+pub(crate) fn handle_ack(slot: &mut Option<ClientTransfer>, transfer_id: u64, seq: u32) -> Replies {
     let Some(ClientTransfer::Sending {
         id,
         sender,
@@ -243,7 +258,7 @@ pub(super) fn handle_ack(slot: &mut Option<ClientTransfer>, transfer_id: u64, se
 
 /// The server ended the transfer: success, failure, or the user's cancel.
 /// Dropping a `Receiver` unlinks the partial file it was writing.
-pub(super) fn handle_end(slot: &mut Option<ClientTransfer>, transfer_id: u64) {
+pub(crate) fn handle_end(slot: &mut Option<ClientTransfer>, transfer_id: u64) {
     if slot
         .as_ref()
         .is_some_and(|transfer| transfer.id() == transfer_id)
