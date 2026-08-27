@@ -16,6 +16,7 @@ use crate::app::App;
 pub(super) use manifest::normalize_plugin_id;
 use manifest::{
     effective_platforms, ensure_platform_supported, normalize_action_id, normalize_plugin_source,
+    platform_supported,
 };
 
 #[cfg(test)]
@@ -241,6 +242,48 @@ impl App {
         .map_err(|(_, message)| message)?;
         let mut context = self.current_plugin_context("keybinding");
         context.invocation_source = Some("keybinding".to_string());
+        self.start_plugin_command(
+            &plugin,
+            Some(action.action_id),
+            None,
+            action.command,
+            &context,
+            None,
+        )
+        .map(|_| ())
+        .map_err(|(_, message)| message)
+    }
+
+    /// Sibling of `invoke_plugin_action_from_keybind` that scopes the invocation
+    /// context to the right-clicked target instead of the active workspace, so a
+    /// plugin reading `--from-context` acts on the row the user clicked.
+    pub(crate) fn invoke_plugin_action_from_context_menu(
+        &mut self,
+        action_id: &str,
+        ws_idx: usize,
+        pane_id: Option<crate::layout::PaneId>,
+    ) -> Result<(), String> {
+        self.refresh_installed_plugins()
+            .map_err(|err| format!("failed to load plugin registry: {err}"))?;
+        let (plugin, action) = self
+            .find_plugin_action(None, action_id)
+            .map_err(|(_, message)| message)?;
+        if !plugin.enabled {
+            return Err(format!("plugin {} is disabled", plugin.plugin_id));
+        }
+        ensure_platform_supported(
+            effective_platforms(&action.platforms, &plugin.platforms),
+            &action.qualified_id(),
+        )
+        .map_err(|(_, message)| message)?;
+        if self.state.workspaces.get(ws_idx).is_none() {
+            return Err("context menu workspace is gone".to_string());
+        }
+        let mut context = match pane_id {
+            Some(pane_id) => self.plugin_context_for_pane(ws_idx, pane_id, "context_menu"),
+            None => self.plugin_context_for_workspace(ws_idx, "context_menu"),
+        };
+        context.invocation_source = Some("context_menu".to_string());
         self.start_plugin_command(
             &plugin,
             Some(action.action_id),
@@ -686,6 +729,29 @@ fn manifest_action_info(
         command: action.command.clone(),
         platforms: effective_platforms(&action.platforms, plugin_platforms).clone(),
     }
+}
+
+/// Actions a context menu may offer for `context`: declared for that context by
+/// an enabled plugin, and runnable on this platform. Sorted by qualified id so
+/// menu order does not follow the registry's hash order.
+pub(crate) fn menu_actions_for_context(
+    plugins: &crate::app::state::InstalledPluginRegistry,
+    context: crate::api::schema::PluginActionContext,
+) -> Vec<PluginActionInfo> {
+    let mut actions = plugins
+        .values()
+        .filter(|plugin| plugin.enabled && plugin_manifest_available(plugin))
+        .flat_map(|plugin| {
+            plugin
+                .actions
+                .iter()
+                .map(|action| manifest_action_info(&plugin.plugin_id, &plugin.platforms, action))
+        })
+        .filter(|action| action.contexts.contains(&context))
+        .filter(|action| platform_supported(&action.platforms))
+        .collect::<Vec<_>>();
+    actions.sort_by_key(|action| action.qualified_id());
+    actions
 }
 
 fn manifest_actions(
@@ -2542,6 +2608,77 @@ command = ["sh", "-c", "printf '%s' \"$HERDR_PLUGIN_CONTEXT_JSON\" > {}"]
             context.workspace_id.as_deref(),
             Some(active_workspace_id.as_str())
         );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The menu row the user clicked must scope the invocation, or a plugin
+    /// reading the context acts on whichever workspace happens to be active.
+    #[cfg(unix)]
+    #[test]
+    fn context_menu_action_uses_clicked_workspace_not_active() {
+        use crate::app::state::{ContextMenuKind, ContextMenuState, MenuListState};
+
+        let mut app = test_app();
+        app.state.workspaces = vec![
+            crate::workspace::Workspace::test_new("active"),
+            crate::workspace::Workspace::test_new("clicked"),
+        ];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        let active_workspace_id = app.public_workspace_id(0);
+        let clicked_workspace_id = app.public_workspace_id(1);
+
+        let root = unique_temp_path("plugin-menu-context");
+        let capture = root.join("context.json");
+        write_manifest_content(
+            &root,
+            &format!(
+                r#"
+id = "example.menu-context"
+name = "Menu Context"
+version = "0.1.0"
+min_herdr_version = "0.6.10"
+
+[[actions]]
+id = "status"
+title = "Worktree status"
+contexts = ["workspace"]
+command = ["sh", "-c", "printf '%s' \"$HERDR_PLUGIN_CONTEXT_JSON\" > {}"]
+"#,
+                capture.display()
+            ),
+        );
+        link_manifest(&mut app, &root);
+
+        let menu = ContextMenuState {
+            kind: ContextMenuKind::Workspace { ws_idx: 1 },
+            x: 0,
+            y: 0,
+            list: MenuListState::new(0),
+        };
+        let idx = menu
+            .items(&app.state.installed_plugins)
+            .iter()
+            .position(|item| item.label() == "Worktree status")
+            .expect("plugin action listed in workspace context menu");
+        app.apply_context_menu_action_via_api(menu, idx);
+
+        let context: PluginInvocationContext =
+            serde_json::from_str(&read_capture_when_ready(&capture, || {
+                app.drain_all_internal_events();
+            }))
+            .unwrap();
+        assert_eq!(
+            context.workspace_id.as_deref(),
+            Some(clicked_workspace_id.as_str())
+        );
+        assert_ne!(
+            context.workspace_id.as_deref(),
+            Some(active_workspace_id.as_str())
+        );
+        assert_eq!(context.invocation_source.as_deref(), Some("context_menu"));
 
         let _ = std::fs::remove_dir_all(root);
     }

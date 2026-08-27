@@ -116,6 +116,14 @@ handlers can also declare their own `platforms`; item-level platforms override
 the top-level list. Local plugins without top-level `platforms` link with a
 warning.
 
+An action's `contexts` list decides which right-click menus offer it.
+`workspace` puts the action in the sidebar workspace menu and `pane` puts it in
+the pane menu, always after Herdr's own entries. A menu invocation runs against
+the row that was clicked rather than the active workspace, and arrives with
+`invocation_source = "context_menu"`. Other context values parse but do not add
+a menu entry yet. Actions without `contexts` stay reachable through keybindings,
+link handlers, and `herdr plugin action invoke`.
+
 `command` values are argv arrays. Herdr does not run them through a shell, so
 there is no shell expansion unless your command starts a shell itself. Put
 language-specific behavior in your script or binary.

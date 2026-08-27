@@ -1248,14 +1248,14 @@ impl AppState {
     pub(crate) fn context_menu_rect(&self) -> Option<Rect> {
         let menu = self.context_menu.as_ref()?;
         let screen = self.screen_rect();
-        let max_item_w = menu
-            .items()
+        let items = menu.items(&self.installed_plugins);
+        let max_item_w = items
             .iter()
-            .map(|item| item.len() as u16)
+            .map(|item| crate::ui::display_width_u16(item.label()))
             .max()
             .unwrap_or(0);
         let menu_w = (max_item_w + 4).max(14).min(screen.width.max(1));
-        let menu_h = (menu.items().len() as u16 + 2).min(screen.height.max(1));
+        let menu_h = (items.len() as u16 + 2).min(screen.height.max(1));
         let x = menu.x.min(screen.x + screen.width.saturating_sub(menu_w));
         let y = menu.y.min(screen.y + screen.height.saturating_sub(menu_h));
         Some(Rect::new(x, y, menu_w, menu_h))
@@ -1274,7 +1274,7 @@ impl AppState {
         let item_count = self
             .context_menu
             .as_ref()
-            .map(|menu| menu.items().len() as u16)
+            .map(|menu| menu.items(&self.installed_plugins).len() as u16)
             .unwrap_or(0);
         if col >= inner_x
             && col < inner_x + inner_w
@@ -3071,9 +3071,9 @@ mod tests {
             } if pane_id == target && source_pane_id == source
         ));
         let swap_idx = menu
-            .items()
+            .items(&app.state.installed_plugins)
             .iter()
-            .position(|item| *item == "Swap with focused pane")
+            .position(|item| item.label() == "Swap with focused pane")
             .expect("swap item");
         menu.list.highlighted = swap_idx;
 
@@ -3151,7 +3151,10 @@ mod tests {
                 ..
             } if pane_id == target && source_pane_id == source
         ));
-        assert!(menu.items().contains(&"Swap with focused pane"));
+        assert!(menu
+            .items(&app.state.installed_plugins)
+            .iter()
+            .any(|item| item.label() == "Swap with focused pane"));
     }
 
     #[tokio::test]
@@ -4271,9 +4274,9 @@ mod tests {
 
         let menu_state = app.state.context_menu.as_ref().expect("pane context menu");
         let close_idx = menu_state
-            .items()
+            .items(&app.state.installed_plugins)
             .iter()
-            .position(|item| *item == "Close pane")
+            .position(|item| item.label() == "Close pane")
             .expect("close pane menu item");
         let menu = app
             .state
@@ -4324,9 +4327,9 @@ mod tests {
 
         let menu_state = app.state.context_menu.as_ref().expect("pane context menu");
         let close_idx = menu_state
-            .items()
+            .items(&app.state.installed_plugins)
             .iter()
-            .position(|item| *item == "Close pane")
+            .position(|item| item.label() == "Close pane")
             .expect("close pane menu item");
         let menu = app
             .state

@@ -1287,8 +1287,72 @@ pub struct ContextMenuState {
     pub list: MenuListState,
 }
 
+/// A context menu row: either a built-in Herdr action or a plugin action.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContextMenuItem {
+    Native(&'static str),
+    Plugin {
+        label: String,
+        /// Qualified (`plugin_id.action_id`) so duplicate action ids across
+        /// plugins resolve through the existing lookup rule.
+        action_id: String,
+    },
+}
+
+impl ContextMenuItem {
+    pub fn label(&self) -> &str {
+        match self {
+            Self::Native(label) => label,
+            Self::Plugin { label, .. } => label,
+        }
+    }
+
+    pub fn native(&self) -> Option<&'static str> {
+        match self {
+            Self::Native(label) => Some(label),
+            Self::Plugin { .. } => None,
+        }
+    }
+}
+
+impl ContextMenuKind {
+    fn plugin_action_context(&self) -> Option<crate::api::schema::PluginActionContext> {
+        match self {
+            Self::Workspace { .. } | Self::GitWorkspace { .. } => {
+                Some(crate::api::schema::PluginActionContext::Workspace)
+            }
+            Self::Pane { .. } => Some(crate::api::schema::PluginActionContext::Pane),
+            Self::Tab { .. } => None,
+        }
+    }
+}
+
 impl ContextMenuState {
-    pub fn items(&self) -> Vec<&'static str> {
+    pub fn items(&self, plugins: &InstalledPluginRegistry) -> Vec<ContextMenuItem> {
+        let mut items = self
+            .native_items()
+            .into_iter()
+            .map(ContextMenuItem::Native)
+            .collect::<Vec<_>>();
+        // Plugin rows are appended so the first row stays a native action: a
+        // context menu row is invoked without confirmation.
+        if let Some(context) = self.kind.plugin_action_context() {
+            items.extend(
+                crate::app::api::plugins::menu_actions_for_context(plugins, context)
+                    .into_iter()
+                    .map(|action| {
+                        let action_id = action.qualified_id();
+                        ContextMenuItem::Plugin {
+                            label: action.title,
+                            action_id,
+                        }
+                    }),
+            );
+        }
+        items
+    }
+
+    fn native_items(&self) -> Vec<&'static str> {
         match self.kind {
             ContextMenuKind::Workspace { .. } => vec!["Rename", "Close"],
             ContextMenuKind::GitWorkspace {
@@ -2355,6 +2419,81 @@ mod tests {
     use super::*;
     use crossterm::event::KeyEvent;
 
+    fn menu_labels(items: &[ContextMenuItem]) -> Vec<&str> {
+        items.iter().map(ContextMenuItem::label).collect()
+    }
+
+    fn plugin_with_action(
+        plugin_id: &str,
+        enabled: bool,
+        action: crate::api::schema::PluginManifestAction,
+    ) -> crate::api::schema::InstalledPluginInfo {
+        crate::api::schema::InstalledPluginInfo {
+            plugin_id: plugin_id.into(),
+            name: plugin_id.into(),
+            version: "0.1.0".into(),
+            min_herdr_version: "0.7.0".into(),
+            description: None,
+            manifest_path: format!("/plugins/{plugin_id}/herdr-plugin.toml"),
+            plugin_root: format!("/plugins/{plugin_id}"),
+            enabled,
+            platforms: None,
+            build: Vec::new(),
+            startup: Vec::new(),
+            actions: vec![action],
+            events: Vec::new(),
+            panes: Vec::new(),
+            link_handlers: Vec::new(),
+            source: crate::api::schema::PluginSourceInfo::default(),
+            warnings: Vec::new(),
+        }
+    }
+
+    fn manifest_action(
+        id: &str,
+        title: &str,
+        contexts: Vec<crate::api::schema::PluginActionContext>,
+        platforms: Option<Vec<crate::api::schema::PluginPlatform>>,
+    ) -> crate::api::schema::PluginManifestAction {
+        crate::api::schema::PluginManifestAction {
+            id: id.into(),
+            title: title.into(),
+            description: None,
+            contexts,
+            platforms,
+            command: vec!["true".into()],
+        }
+    }
+
+    fn registry(plugins: Vec<crate::api::schema::InstalledPluginInfo>) -> InstalledPluginRegistry {
+        plugins
+            .into_iter()
+            .map(|plugin| (plugin.plugin_id.clone(), plugin))
+            .collect()
+    }
+
+    fn workspace_menu() -> ContextMenuState {
+        ContextMenuState {
+            kind: ContextMenuKind::GitWorkspace {
+                ws_idx: 0,
+                is_linked_worktree: true,
+                has_worktree_children: false,
+                collapsed: false,
+            },
+            x: 0,
+            y: 0,
+            list: MenuListState::new(0),
+        }
+    }
+
+    fn foreign_platform() -> crate::api::schema::PluginPlatform {
+        if cfg!(target_os = "linux") {
+            crate::api::schema::PluginPlatform::Windows
+        } else {
+            crate::api::schema::PluginPlatform::Linux
+        }
+    }
+
     #[test]
     fn pane_size_estimate_uses_headless_size_before_first_view() {
         let mut state = AppState::test_new();
@@ -2635,8 +2774,9 @@ mod tests {
             list: MenuListState::new(0),
         };
 
+        let items = menu.items(&InstalledPluginRegistry::new());
         assert_eq!(
-            menu.items(),
+            menu_labels(&items),
             &["Rename", "Close", "Delete worktree checkout..."]
         );
     }
@@ -2655,8 +2795,9 @@ mod tests {
             list: MenuListState::new(0),
         };
 
+        let items = menu.items(&InstalledPluginRegistry::new());
         assert_eq!(
-            menu.items(),
+            menu_labels(&items),
             &["Rename", "Close", "New worktree", "Open worktree..."]
         );
     }
@@ -2675,8 +2816,9 @@ mod tests {
             list: MenuListState::new(0),
         };
 
+        let items = menu.items(&InstalledPluginRegistry::new());
         assert_eq!(
-            menu.items(),
+            menu_labels(&items),
             &[
                 "Rename",
                 "Close group",
@@ -2684,6 +2826,163 @@ mod tests {
                 "Open worktree...",
                 "Collapse"
             ]
+        );
+    }
+
+    #[test]
+    fn workspace_context_menu_lists_matching_plugin_action_after_native_items() {
+        let plugins = registry(vec![plugin_with_action(
+            "example.worktree",
+            true,
+            manifest_action(
+                "status",
+                "Worktree status",
+                vec![crate::api::schema::PluginActionContext::Workspace],
+                None,
+            ),
+        )]);
+
+        let items = workspace_menu().items(&plugins);
+
+        assert_eq!(
+            menu_labels(&items),
+            &[
+                "Rename",
+                "Close",
+                "Delete worktree checkout...",
+                "Worktree status"
+            ]
+        );
+        assert_eq!(
+            items.last(),
+            Some(&ContextMenuItem::Plugin {
+                label: "Worktree status".into(),
+                action_id: "example.worktree.status".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn workspace_context_menu_skips_plugin_action_for_another_context() {
+        let plugins = registry(vec![plugin_with_action(
+            "example.worktree",
+            true,
+            manifest_action(
+                "status",
+                "Worktree status",
+                vec![crate::api::schema::PluginActionContext::Pane],
+                None,
+            ),
+        )]);
+
+        assert_eq!(
+            menu_labels(&workspace_menu().items(&plugins)),
+            &["Rename", "Close", "Delete worktree checkout..."]
+        );
+    }
+
+    #[test]
+    fn workspace_context_menu_skips_actions_from_disabled_plugins() {
+        let plugins = registry(vec![plugin_with_action(
+            "example.worktree",
+            false,
+            manifest_action(
+                "status",
+                "Worktree status",
+                vec![crate::api::schema::PluginActionContext::Workspace],
+                None,
+            ),
+        )]);
+
+        assert_eq!(
+            menu_labels(&workspace_menu().items(&plugins)),
+            &["Rename", "Close", "Delete worktree checkout..."]
+        );
+    }
+
+    #[test]
+    fn workspace_context_menu_skips_actions_excluded_by_platform() {
+        let plugins = registry(vec![plugin_with_action(
+            "example.worktree",
+            true,
+            manifest_action(
+                "status",
+                "Worktree status",
+                vec![crate::api::schema::PluginActionContext::Workspace],
+                Some(vec![foreign_platform()]),
+            ),
+        )]);
+
+        assert_eq!(
+            menu_labels(&workspace_menu().items(&plugins)),
+            &["Rename", "Close", "Delete worktree checkout..."]
+        );
+    }
+
+    #[test]
+    fn plugin_actions_never_take_the_default_context_menu_selection() {
+        let plugins = registry(vec![plugin_with_action(
+            "example.worktree",
+            true,
+            manifest_action(
+                "plan-rm",
+                "Remove worktree plan",
+                vec![crate::api::schema::PluginActionContext::Workspace],
+                None,
+            ),
+        )]);
+        let menu = workspace_menu();
+
+        let items = menu.items(&plugins);
+
+        assert_eq!(
+            items[menu.list.highlighted],
+            ContextMenuItem::Native("Rename")
+        );
+        assert!(
+            items
+                .iter()
+                .take_while(|item| item.native().is_some())
+                .count()
+                >= 3
+        );
+    }
+
+    #[test]
+    fn pane_context_menu_lists_pane_scoped_plugin_actions_last() {
+        let plugins = registry(vec![plugin_with_action(
+            "example.pane-tools",
+            true,
+            manifest_action(
+                "inspect",
+                "Inspect pane",
+                vec![crate::api::schema::PluginActionContext::Pane],
+                None,
+            ),
+        )]);
+        let menu = ContextMenuState {
+            kind: ContextMenuKind::Pane {
+                ws_idx: 0,
+                tab_idx: 0,
+                pane_id: PaneId::alloc(),
+                source_pane_id: None,
+                has_manual_label: false,
+                right_click_passthrough: false,
+            },
+            x: 0,
+            y: 0,
+            list: MenuListState::new(0),
+        };
+
+        let items = menu.items(&plugins);
+
+        assert_eq!(items.first(), Some(&ContextMenuItem::Native("Rename pane")));
+        assert_eq!(
+            items.last(),
+            Some(&ContextMenuItem::Plugin {
+                label: "Inspect pane".into(),
+                action_id: "example.pane-tools.inspect".into(),
+            })
         );
     }
 }
