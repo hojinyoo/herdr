@@ -51,9 +51,10 @@ mod terminal;
 pub(crate) use self::{
     lease::{ConsumedInputLease, ForwardedInputLease, InputLeaseKey, InputLeaseTable, RepeatPlan},
     modal::{
-        handle_file_transfer_path_key, handle_file_transfer_progress_key, handle_global_menu_key,
-        handle_keybind_help_key, handle_navigator_key, insert_keybind_help_query_text,
-        insert_navigator_search_text, insert_rename_input_text, open_new_workspace_dialog,
+        handle_file_transfer_browse_key, handle_file_transfer_path_key,
+        handle_file_transfer_progress_key, handle_global_menu_key, handle_keybind_help_key,
+        handle_navigator_key, insert_keybind_help_query_text, insert_navigator_search_text,
+        insert_rename_input_text, open_new_workspace_dialog,
     },
     navigate::{
         terminal_direct_indexed_navigation_action, terminal_direct_non_indexed_navigation_action,
@@ -120,6 +121,9 @@ impl App {
                 Mode::FileTransferPath => handle_file_transfer_path_key(&mut self.state, key_event),
                 Mode::FileTransferProgress => {
                     handle_file_transfer_progress_key(&mut self.state, key_event)
+                }
+                Mode::FileTransferBrowse => {
+                    handle_file_transfer_browse_key(&mut self.state, key_event)
                 }
                 Mode::Terminal => unreachable!(),
             },
@@ -213,8 +217,17 @@ impl App {
 
     pub(crate) fn paste_into_active_text_input(&mut self, text: &str) -> bool {
         match self.state.mode {
-            Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane | Mode::FileTransferPath => {
+            Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane => {
                 insert_rename_input_text(&mut self.state, text);
+                true
+            }
+            Mode::FileTransferPath => {
+                // A drag-and-drop reaches this field as a bracketed paste of a
+                // shell-shaped path — quoted, or with spaces backslash-escaped.
+                // Undo that so dropping a file with a space in its name works the
+                // same as typing the path by hand.
+                let normalized = crate::file_transfer::normalize_dropped_path(text);
+                insert_rename_input_text(&mut self.state, &normalized);
                 true
             }
             Mode::NewLinkedWorktree => {
@@ -855,6 +868,11 @@ fn app_for_mouse_test() -> App {
     app.state.view.sidebar_rect = ratatui::layout::Rect::new(0, 0, 26, 20);
     app.state.view.terminal_area = ratatui::layout::Rect::new(26, 0, 80, 20);
     app
+}
+
+#[cfg(test)]
+pub(super) fn open_file_transfer_browser_for_test(state: &mut AppState, dir: std::path::PathBuf) {
+    modal::open_file_transfer_browser(state, dir);
 }
 
 #[cfg(test)]

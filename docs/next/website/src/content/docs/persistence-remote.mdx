@@ -40,8 +40,15 @@ herdr session delete side-project --json
 While attached with `--remote`, Herdr can move a single file between your
 machine and the remote pane over its own protocol, with progress and cancel in
 the Herdr UI. Pick **send file** or **receive file** from the global menu, or
-right-click a pane and choose **Send file...** / **Receive file...**, then type
-one path and press Enter.
+right-click a pane and choose **Send file...** / **Receive file...**.
+
+**Receiving** opens a browser of the remote directory: arrow keys move, Enter
+opens a folder or picks a file, typing filters, `Ctrl+H` toggles hidden files,
+and Esc cancels. It starts in the focused pane's working directory.
+
+**Sending** asks for a path on your own machine. You can type it, or simply
+**drag the file onto the open popup** — the path is filled in for you, including
+names with spaces.
 
 - **Send** reads the path on your local machine and writes it into the focused
   pane's working directory.

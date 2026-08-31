@@ -97,6 +97,11 @@ impl PaneClickState {
     }
 }
 
+#[cfg(test)]
+pub(crate) fn open_file_transfer_browser_for_test(state: &mut AppState, dir: std::path::PathBuf) {
+    input::open_file_transfer_browser_for_test(state, dir);
+}
+
 pub struct App {
     pub state: AppState,
     pub(crate) pane_graphics: pane_graphics::Runtime,
@@ -575,6 +580,8 @@ impl App {
             request_file_transfer: None,
             request_file_transfer_cancel: false,
             file_transfer: None,
+            file_browser: None,
+            request_file_browser: false,
             request_client_config_reload: false,
             request_clipboard_write: None,
             creating_new_tab: false,
@@ -1073,6 +1080,11 @@ impl App {
             if self.state.request_reload_config {
                 self.state.request_reload_config = false;
                 self.reload_config();
+                needs_render = true;
+            }
+
+            if std::mem::take(&mut self.state.request_file_browser) {
+                self.open_file_transfer_browser_at_focus();
                 needs_render = true;
             }
 
@@ -1979,6 +1991,9 @@ impl App {
             }
             Mode::FileTransferProgress => {
                 input::handle_file_transfer_progress_key(&mut self.state, key_event);
+            }
+            Mode::FileTransferBrowse => {
+                input::handle_file_transfer_browse_key(&mut self.state, key_event);
             }
             Mode::Settings => {
                 self.handle_settings_key(key_event);

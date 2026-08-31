@@ -910,6 +910,8 @@ pub enum Mode {
     FileTransferPath,
     /// Watching a transfer run, or reading why it failed.
     FileTransferProgress,
+    /// Browsing the server's filesystem to pick a file to receive.
+    FileTransferBrowse,
 }
 
 impl Mode {
@@ -941,6 +943,7 @@ impl Mode {
                 | Mode::GlobalMenu
                 | Mode::KeybindHelp
                 | Mode::FileTransferProgress
+                | Mode::FileTransferBrowse
         )
     }
 }
@@ -1345,6 +1348,96 @@ impl ContextMenuState {
     }
 }
 
+/// One row in the receive browser.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileBrowserEntry {
+    pub name: String,
+    pub is_dir: bool,
+    /// `None` for directories and for anything whose metadata could not be read.
+    pub size: Option<u64>,
+    /// The `..` row, which sorts first and is never filtered out.
+    pub is_parent: bool,
+}
+
+impl FileBrowserEntry {
+    fn matches(&self, query: &str) -> bool {
+        self.is_parent || self.name.to_lowercase().contains(&query.to_lowercase())
+    }
+}
+
+/// Receive-side file browser. The source lives on the machine running the
+/// server, so listing it needs no protocol support.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileBrowserState {
+    pub dir: std::path::PathBuf,
+    pub entries: Vec<FileBrowserEntry>,
+    pub selected: usize,
+    pub query: String,
+    pub show_hidden: bool,
+    /// Set when the directory could not be read; the list is empty but the
+    /// browser stays open so the user can go back up.
+    pub error: Option<String>,
+    /// True when the listing was capped, so the footer can say so rather than
+    /// silently showing a partial directory.
+    pub truncated: bool,
+}
+
+/// Directories with more entries than this are listed partially. Reading is
+/// per-navigation, not per-keystroke, but an enormous directory should not
+/// stall a render either.
+pub const FILE_BROWSER_MAX_ENTRIES: usize = 2000;
+
+impl FileBrowserState {
+    pub(crate) fn filtered_indices(&self) -> Vec<usize> {
+        let query = self.query.trim();
+        self.entries
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, entry)| (query.is_empty() || entry.matches(query)).then_some(idx))
+            .collect()
+    }
+
+    pub(crate) fn selected_entry(&self) -> Option<&FileBrowserEntry> {
+        let indices = self.filtered_indices();
+        if indices.contains(&self.selected) {
+            return self.entries.get(self.selected);
+        }
+        indices.first().and_then(|idx| self.entries.get(*idx))
+    }
+
+    pub(crate) fn select_next(&mut self) {
+        let indices = self.filtered_indices();
+        if indices.is_empty() {
+            return;
+        }
+        let pos = indices
+            .iter()
+            .position(|idx| *idx == self.selected)
+            .unwrap_or(0);
+        self.selected = indices[(pos + 1).min(indices.len() - 1)];
+    }
+
+    pub(crate) fn select_previous(&mut self) {
+        let indices = self.filtered_indices();
+        if indices.is_empty() {
+            return;
+        }
+        let pos = indices
+            .iter()
+            .position(|idx| *idx == self.selected)
+            .unwrap_or(0);
+        self.selected = indices[pos.saturating_sub(1)];
+    }
+
+    /// Keeps the cursor on a row that survives the current filter.
+    pub(crate) fn clamp_selection(&mut self) {
+        let indices = self.filtered_indices();
+        if !indices.contains(&self.selected) {
+            self.selected = indices.first().copied().unwrap_or(0);
+        }
+    }
+}
+
 /// Which way the bytes move, from the perspective of the machine running the
 /// herdr server.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1524,6 +1617,11 @@ pub struct AppState {
     pub request_file_transfer_cancel: bool,
     /// Progress mirror for the popup. Server-owned; the TUI only renders it.
     pub file_transfer: Option<FileTransferState>,
+    /// Receive-side file browser, when open.
+    pub file_browser: Option<FileBrowserState>,
+    /// Set by the global menu, which has no pane in hand; drained by the app so
+    /// the browser can start at the focused pane's directory.
+    pub request_file_browser: bool,
     /// Set when the headless server should ask attached clients to reload
     /// their client-local sound config from disk.
     pub request_client_config_reload: bool,
@@ -1916,6 +2014,8 @@ impl AppState {
             request_file_transfer: None,
             request_file_transfer_cancel: false,
             file_transfer: None,
+            file_browser: None,
+            request_file_browser: false,
             request_client_config_reload: false,
             request_clipboard_write: None,
             creating_new_tab: false,

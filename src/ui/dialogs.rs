@@ -6,7 +6,7 @@ use ratatui::{
     Frame,
 };
 
-use super::text::{display_width_u16, take_suffix_width, truncate_end};
+use super::text::{display_width_u16, middle_elide, take_suffix_width, truncate_end};
 use super::widgets::{
     action_button_row_rects, centered_popup_rect, panel_contrast_fg, render_action_button,
     render_modal_header, render_modal_shell, render_panel_shell, ActionButtonSpec,
@@ -237,6 +237,169 @@ pub(super) fn render_file_transfer_prompt(app: &AppState, frame: &mut Frame, are
             .fg(app.palette.text)
             .bg(app.palette.surface0),
     );
+}
+
+pub(crate) const FILE_BROWSER_POPUP_WIDTH: u16 = 72;
+pub(crate) const FILE_BROWSER_POPUP_HEIGHT: u16 = 18;
+
+/// Scrolls the window so the cursor stays visible without jumping.
+pub(crate) fn file_browser_window_start(position: usize, total: usize, visible: usize) -> usize {
+    if visible == 0 || total <= visible {
+        return 0;
+    }
+    let half = visible / 2;
+    position
+        .saturating_sub(half)
+        .min(total.saturating_sub(visible))
+}
+
+pub(super) fn render_file_transfer_browser(app: &AppState, frame: &mut Frame, area: Rect) {
+    super::dim_background(frame, area);
+
+    let Some(browser) = app.file_browser.as_ref() else {
+        return;
+    };
+    let Some(inner) = render_modal_shell(
+        frame,
+        area,
+        FILE_BROWSER_POPUP_WIDTH,
+        FILE_BROWSER_POPUP_HEIGHT,
+        &app.palette,
+    ) else {
+        return;
+    };
+    if inner.height < 6 {
+        return;
+    }
+
+    let rows = Layout::vertical([
+        Constraint::Length(1), // title
+        Constraint::Length(1), // cwd
+        Constraint::Length(1), // filter
+        Constraint::Min(1),    // list
+        Constraint::Length(1), // footer
+    ])
+    .areas::<5>(inner);
+
+    render_modal_header(frame, rows[0], "receive file", &app.palette);
+
+    // The path is what tells the user which machine and directory they are in,
+    // so elide the middle rather than the end.
+    frame.render_widget(
+        Paragraph::new(middle_elide(
+            &browser.dir.to_string_lossy(),
+            rows[1].width as usize,
+        ))
+        .style(Style::default().fg(app.palette.overlay0)),
+        rows[1],
+    );
+
+    let filter = if browser.query.is_empty() {
+        "type to filter".to_owned()
+    } else {
+        format!("filter: {}", browser.query)
+    };
+    let filter_style = if browser.query.is_empty() {
+        Style::default().fg(app.palette.surface_dim)
+    } else {
+        Style::default().fg(app.palette.text)
+    };
+    frame.render_widget(
+        Paragraph::new(truncate_end(&filter, rows[2].width as usize)).style(filter_style),
+        rows[2],
+    );
+
+    if let Some(error) = browser.error.as_ref() {
+        frame.render_widget(
+            Paragraph::new(error.as_str())
+                .style(Style::default().fg(app.palette.red))
+                .wrap(Wrap { trim: true }),
+            rows[3],
+        );
+    } else {
+        render_file_browser_list(app, browser, frame, rows[3]);
+    }
+
+    let footer = if browser.truncated {
+        format!(
+            "↑↓ move   ↵ open/select   ^h hidden   esc cancel   (first {} shown)",
+            crate::app::state::FILE_BROWSER_MAX_ENTRIES
+        )
+    } else {
+        "↑↓ move   ↵ open/select   ^h hidden   esc cancel".to_owned()
+    };
+    frame.render_widget(
+        Paragraph::new(truncate_end(&footer, rows[4].width as usize))
+            .style(Style::default().fg(app.palette.overlay0)),
+        rows[4],
+    );
+}
+
+fn render_file_browser_list(
+    app: &AppState,
+    browser: &crate::app::state::FileBrowserState,
+    frame: &mut Frame,
+    area: Rect,
+) {
+    let indices = browser.filtered_indices();
+    if indices.is_empty() {
+        frame.render_widget(
+            Paragraph::new("no matching entries")
+                .style(Style::default().fg(app.palette.surface_dim)),
+            area,
+        );
+        return;
+    }
+
+    let visible = area.height as usize;
+    let position = indices
+        .iter()
+        .position(|idx| *idx == browser.selected)
+        .unwrap_or(0);
+    let start = file_browser_window_start(position, indices.len(), visible);
+
+    for (row, entry_idx) in indices.iter().skip(start).take(visible).enumerate() {
+        let Some(entry) = browser.entries.get(*entry_idx) else {
+            continue;
+        };
+        let y = area.y + row as u16;
+        let selected = *entry_idx == browser.selected;
+        let style = if selected {
+            Style::default()
+                .fg(panel_contrast_fg(&app.palette))
+                .bg(app.palette.accent)
+                .add_modifier(Modifier::BOLD)
+        } else if entry.is_dir {
+            Style::default().fg(app.palette.blue)
+        } else {
+            Style::default().fg(app.palette.text)
+        };
+
+        // Size is right-aligned in its own column so the names stay scannable.
+        let size = entry.size.map(human_bytes).unwrap_or_else(|| {
+            if entry.is_dir {
+                String::new()
+            } else {
+                "?".into()
+            }
+        });
+        let size_width = size.len().min(area.width as usize);
+        let name_width = (area.width as usize).saturating_sub(size_width + 5);
+        let marker = if selected { "▸" } else { " " };
+        let name = if entry.is_dir && !entry.is_parent {
+            format!("{}/", entry.name)
+        } else {
+            entry.name.clone()
+        };
+        let line = format!(
+            " {marker} {:<name_width$} {size:>size_width$} ",
+            truncate_end(&name, name_width),
+        );
+        frame.render_widget(
+            Paragraph::new(truncate_end(&line, area.width as usize)).style(style),
+            Rect::new(area.x, y, area.width, 1),
+        );
+    }
 }
 
 fn human_bytes(bytes: u64) -> String {
@@ -1415,5 +1578,57 @@ mod tests {
             worktree_overlay_caret("あい"),
             Position::new(input.x + 5, input.y)
         );
+    }
+
+    #[test]
+    fn the_receive_browser_lays_out_names_and_sizes_without_clipping() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let dir = std::env::temp_dir().join(format!(
+            "herdr-browser-render-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("build")).expect("dir");
+        std::fs::write(dir.join("report.pdf"), vec![0u8; 2_500_000]).expect("file");
+        std::fs::write(dir.join("notes.md"), b"hi").expect("file");
+
+        let mut app = AppState::test_new();
+        crate::app::open_file_transfer_browser_for_test(&mut app, dir.clone());
+        let area = Rect::new(0, 0, 100, 26);
+        let mut terminal =
+            Terminal::new(TestBackend::new(area.width, area.height)).expect("test terminal");
+        terminal
+            .draw(|frame| super::render_file_transfer_browser(&app, frame, area))
+            .expect("browser should render");
+        let buf = terminal.backend().buffer().clone();
+        let rows: Vec<String> = (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect();
+        let screen = rows.join("\n");
+
+        assert!(screen.contains("receive file"), "{screen}");
+        // Directories sort first and are marked; the parent row is always offered.
+        let dirs_row = rows
+            .iter()
+            .position(|r| r.contains("build/"))
+            .expect("dirs");
+        let files_row = rows
+            .iter()
+            .position(|r| r.contains("notes.md"))
+            .expect("files");
+        assert!(dirs_row < files_row, "directories must sort above files");
+        assert!(screen.contains(".."), "the parent row must be offered");
+
+        // The size column must land whole. An off-by-one in the row width shows
+        // up here as a truncated "2.4 Mi…" and nowhere else.
+        assert!(screen.contains("2.4 MiB"), "size column clipped:\n{screen}");
+        assert!(screen.contains("2 B"), "small size clipped:\n{screen}");
+        assert!(!screen.contains("Mi…"), "size column clipped:\n{screen}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

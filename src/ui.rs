@@ -23,9 +23,9 @@ mod text;
 mod widgets;
 
 use self::dialogs::{
-    render_confirm_close_overlay, render_file_transfer_progress, render_file_transfer_prompt,
-    render_new_linked_worktree_overlay, render_open_existing_worktree_overlay,
-    render_remove_worktree_overlay, render_rename_overlay,
+    render_confirm_close_overlay, render_file_transfer_browser, render_file_transfer_progress,
+    render_file_transfer_prompt, render_new_linked_worktree_overlay,
+    render_open_existing_worktree_overlay, render_remove_worktree_overlay, render_rename_overlay,
 };
 use self::keybind_help::render_keybind_help_overlay;
 use self::menus::{
@@ -461,6 +461,7 @@ pub fn render_with_runtime_registry(
         Mode::Navigator => render_navigator_overlay(app, terminal_runtimes, frame),
         Mode::FileTransferPath => render_file_transfer_prompt(app, frame, frame.area()),
         Mode::FileTransferProgress => render_file_transfer_progress(app, frame, frame.area()),
+        Mode::FileTransferBrowse => render_file_transfer_browser(app, frame, frame.area()),
         Mode::Terminal => {}
     }
 }

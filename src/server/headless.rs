@@ -1032,6 +1032,12 @@ impl HeadlessServer {
             crate::render_prof::event("full_render_cause.config_reload");
         }
 
+        if std::mem::take(&mut self.app.state.request_file_browser) {
+            self.app.open_file_transfer_browser_at_focus();
+            needs_render = true;
+            crate::render_prof::event("full_render_cause.file_transfer");
+        }
+
         if self.drain_file_transfer_requests() {
             needs_render = true;
             crate::render_prof::event("full_render_cause.file_transfer");

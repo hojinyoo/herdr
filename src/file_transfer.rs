@@ -424,6 +424,108 @@ impl Drop for Receiver {
     }
 }
 
+/// Lists `dir` for the receive browser: directories first, then files, each
+/// alphabetical, with a leading `..` unless `dir` is a filesystem root.
+///
+/// Unreadable entries are skipped rather than failing the whole listing — one
+/// bad symlink should not make a directory unbrowsable. The caller decides what
+/// to do with `truncated`.
+pub(crate) fn list_directory(
+    dir: &Path,
+    show_hidden: bool,
+    max_entries: usize,
+) -> Result<(Vec<DirEntryInfo>, bool), TransferError> {
+    let mut dirs = Vec::new();
+    let mut files = Vec::new();
+    let mut truncated = false;
+
+    for entry in fs::read_dir(dir)? {
+        let Ok(entry) = entry else { continue };
+        let Ok(name) = entry.file_name().into_string() else {
+            continue;
+        };
+        if !show_hidden && name.starts_with('.') {
+            continue;
+        }
+        if dirs.len() + files.len() >= max_entries {
+            truncated = true;
+            break;
+        }
+        // `metadata` follows symlinks, which is what a browser should show.
+        let meta = entry.metadata().ok();
+        let is_dir = meta.as_ref().is_some_and(|m| m.is_dir());
+        let info = DirEntryInfo {
+            is_dir,
+            size: (!is_dir).then(|| meta.as_ref().map(|m| m.len())).flatten(),
+            name,
+        };
+        if is_dir {
+            dirs.push(info);
+        } else {
+            files.push(info);
+        }
+    }
+
+    dirs.sort_by_key(|entry| entry.name.to_lowercase());
+    files.sort_by_key(|entry| entry.name.to_lowercase());
+    dirs.extend(files);
+    Ok((dirs, truncated))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DirEntryInfo {
+    pub(crate) name: String,
+    pub(crate) is_dir: bool,
+    pub(crate) size: Option<u64>,
+}
+
+/// Normalizes text a terminal produced for a file drag-and-drop into a usable
+/// path.
+///
+/// A drop arrives as a bracketed paste of the path as a *shell* would need it:
+/// quoted, or with spaces backslash-escaped. Typing that same path by hand
+/// produces neither. The transfer prompt accepts both, so the drop shape has to
+/// be undone before the path is opened.
+///
+/// Unescaping is unix-only: on Windows the backslash is the path separator, so
+/// stripping it would corrupt every absolute path.
+pub(crate) fn normalize_dropped_path(text: &str) -> String {
+    let trimmed = text.trim_matches(|c: char| c == '\r' || c == '\n');
+    let unquoted = strip_matching_path_quotes(trimmed);
+    if cfg!(windows) {
+        unquoted.to_owned()
+    } else {
+        unescape_dropped_path(unquoted)
+    }
+}
+
+fn strip_matching_path_quotes(text: &str) -> &str {
+    if text.len() < 2 {
+        return text;
+    }
+    let bytes = text.as_bytes();
+    match (bytes.first(), bytes.last()) {
+        (Some(b'\''), Some(b'\'')) | (Some(b'"'), Some(b'"')) => &text[1..text.len() - 1],
+        _ => text,
+    }
+}
+
+fn unescape_dropped_path(text: &str) -> String {
+    let mut unescaped = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            match chars.next() {
+                Some(escaped) => unescaped.push(escaped),
+                None => unescaped.push(ch),
+            }
+        } else {
+            unescaped.push(ch);
+        }
+    }
+    unescaped
+}
+
 /// Bounds a peer-supplied name before it reaches a rendered surface. Ratatui
 /// filters control characters, so this is about length, not injection.
 pub(crate) fn display_name(name: &str) -> String {
@@ -726,6 +828,87 @@ mod tests {
             Ok(None) => panic!("sender ended early without reporting"),
             Err(err) => assert!(matches!(err, TransferError::Desync), "{err}"),
         }
+    }
+
+    #[test]
+    fn list_directory_orders_dirs_first_and_honors_the_hidden_toggle() {
+        let dir = tempdir("listing");
+        fs::create_dir_all(dir.join("zeta")).expect("dir");
+        fs::create_dir_all(dir.join(".hidden-dir")).expect("hidden dir");
+        fs::write(dir.join("alpha.txt"), b"abc").expect("file");
+        fs::write(dir.join("Beta.txt"), b"de").expect("file");
+        fs::write(dir.join(".hidden"), b"x").expect("hidden");
+
+        let (entries, truncated) = list_directory(&dir, false, 100).expect("list");
+        assert!(!truncated);
+        let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+        // Directories first, then files, each case-insensitively alphabetical.
+        assert_eq!(names, vec!["zeta", "alpha.txt", "Beta.txt"]);
+        assert_eq!(entries[1].size, Some(3));
+        assert!(entries[0].size.is_none(), "directories carry no size");
+
+        let (all, _) = list_directory(&dir, true, 100).expect("list hidden");
+        let names: Vec<&str> = all.iter().map(|e| e.name.as_str()).collect();
+        assert!(names.contains(&".hidden"));
+        assert!(names.contains(&".hidden-dir"));
+    }
+
+    #[test]
+    fn list_directory_reports_truncation_instead_of_silently_dropping_entries() {
+        let dir = tempdir("truncate");
+        for i in 0..10 {
+            fs::write(dir.join(format!("f{i}.txt")), b"x").expect("file");
+        }
+        let (entries, truncated) = list_directory(&dir, false, 4).expect("list");
+        assert_eq!(entries.len(), 4);
+        assert!(truncated, "a capped listing must say so");
+    }
+
+    #[test]
+    fn a_dropped_path_is_normalized_into_something_openable() {
+        // A drop is shell-shaped; a typed path is not. Both must work.
+        assert_eq!(normalize_dropped_path("/a/report.pdf"), "/a/report.pdf");
+        assert_eq!(
+            normalize_dropped_path("'/a/my notes.txt'"),
+            "/a/my notes.txt"
+        );
+        assert_eq!(
+            normalize_dropped_path("\"/a/my notes.txt\""),
+            "/a/my notes.txt"
+        );
+        assert_eq!(normalize_dropped_path("/a/report.pdf\r\n"), "/a/report.pdf");
+        // A typed path with no drop shaping is returned untouched.
+        assert_eq!(
+            normalize_dropped_path("relative/path.txt"),
+            "relative/path.txt"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_drops_have_their_shell_escaping_undone() {
+        assert_eq!(
+            normalize_dropped_path("/a/my\\ notes.txt"),
+            "/a/my notes.txt"
+        );
+        assert_eq!(
+            normalize_dropped_path("/a/paren\\(1\\).txt"),
+            "/a/paren(1).txt"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_drops_keep_their_backslashes() {
+        // The separator must survive; unescaping would destroy every path.
+        assert_eq!(
+            normalize_dropped_path("C:\\Users\\me\\a.txt"),
+            "C:\\Users\\me\\a.txt"
+        );
+        assert_eq!(
+            normalize_dropped_path("\"C:\\Users\\me\\my notes.txt\""),
+            "C:\\Users\\me\\my notes.txt"
+        );
     }
 
     #[test]

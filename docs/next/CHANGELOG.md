@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Added
+- Receiving a file now opens a browser of the remote directory — arrow keys, type-to-filter, `Ctrl+H` for hidden files — instead of asking for a typed path. Sending accepts a file dragged onto the open popup, including names with spaces. (#508)
 - `herdr --remote` sessions can now send and receive a single file (up to 256 MiB) over Herdr's own protocol, with progress and cancel in the Herdr UI. Received files land in `remote.file_transfer_dir` (`~/Downloads` by default); sent files land in the focused pane's working directory. Existing files are never overwritten; a colliding name is saved with a numbered suffix. (#508)
 - Text inputs in the rename, new-worktree, and file transfer dialogs now scroll to show the end of a long value instead of clipping it, so a path or branch name longer than the field stays visible while typing. (#508)
 - Custom themes can now define separate light and dark color overrides when automatic theme switching is enabled. (#837, thanks @aneym)
