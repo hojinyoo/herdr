@@ -849,6 +849,9 @@ fn do_handshake(
         .map_err(ClientError::ConnectionFailed)?;
 
     // Send Hello.
+    // Resolved here because the setting is client-side; the server renders the
+    // receive browser and would otherwise have no way to name the destination.
+    let file_transfer_dir = file_transfer::download_dir().to_string_lossy().into_owned();
     let hello = ClientMessage::Hello {
         version: PROTOCOL_VERSION,
         cols,
@@ -863,6 +866,7 @@ fn do_handshake(
             cell_width_px,
             cell_height_px,
         ),
+        file_transfer_dir,
     };
     protocol::write_message(stream, &hello)
         .map_err(|e| ClientError::ConnectionFailed(io::Error::other(e.to_string())))?;

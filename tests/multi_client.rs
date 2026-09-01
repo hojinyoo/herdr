@@ -431,6 +431,13 @@ fn encode_varint_u16(v: u16) -> Vec<u8> {
     }
 }
 
+/// bincode encodes a String as a varint length followed by its bytes.
+fn encode_string(value: &str) -> Vec<u8> {
+    let mut out = encode_varint_u32(value.len() as u32);
+    out.extend_from_slice(value.as_bytes());
+    out
+}
+
 fn encode_varint_enum(variant_idx: u32, fields: &[&[u8]]) -> Vec<u8> {
     let mut buf = encode_varint_u32(variant_idx);
     for field in fields {
@@ -529,6 +536,7 @@ fn client_handshake(
             &encode_varint_u32(0),  // RenderEncoding::SemanticFrame
             &encode_varint_u32(0),  // ClientKeybindings::Server
             &encode_varint_u32(0),  // ClientLaunchMode::App
+            &encode_string(""),     // file_transfer_dir
         ],
     );
     stream

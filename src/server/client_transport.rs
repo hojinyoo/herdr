@@ -308,6 +308,8 @@ pub(crate) enum ServerEvent {
     /// A new client completed the handshake.
     ClientConnected {
         client_id: u64,
+        /// Where this client writes received files, resolved client-side.
+        file_transfer_dir: String,
         cols: u16,
         rows: u16,
         cell_width_px: u32,
@@ -592,6 +594,7 @@ pub(crate) fn handle_client_handshake(
         keybindings,
         direct_attach_requested,
         direct_graphics,
+        file_transfer_dir,
     ) = match hello {
         ClientMessage::Hello {
             version,
@@ -602,6 +605,7 @@ pub(crate) fn handle_client_handshake(
             requested_encoding,
             keybindings,
             launch_mode,
+            file_transfer_dir,
         } => {
             // Version check.
             match protocol::check_client_version(version) {
@@ -642,6 +646,7 @@ pub(crate) fn handle_client_handshake(
                 keybindings,
                 launch_mode == ClientLaunchMode::TerminalAttach,
                 launch_mode == ClientLaunchMode::AppDirectGraphics,
+                file_transfer_dir,
             )
         }
         _ => {
@@ -698,6 +703,7 @@ pub(crate) fn handle_client_handshake(
     // Notify the main loop about the new client.
     let connected = ServerEvent::ClientConnected {
         client_id,
+        file_transfer_dir,
         cols: client_cols,
         rows: client_rows,
         cell_width_px,
@@ -1414,6 +1420,7 @@ new_tab = "ctrl+notakey"
                 requested_encoding: RenderEncoding::TerminalAnsi,
                 keybindings: ClientKeybindings::Server,
                 launch_mode: ClientLaunchMode::App,
+                file_transfer_dir: String::new(),
             },
         )
         .expect("write hello");
@@ -1439,6 +1446,7 @@ new_tab = "ctrl+notakey"
         {
             ServerEvent::ClientConnected {
                 client_id,
+                file_transfer_dir: _,
                 cols,
                 rows,
                 cell_width_px,
@@ -1491,6 +1499,7 @@ new_tab = "ctrl+notakey"
                 requested_encoding: RenderEncoding::TerminalAnsi,
                 keybindings: ClientKeybindings::Server,
                 launch_mode: ClientLaunchMode::TerminalAttach,
+                file_transfer_dir: String::new(),
             },
         )
         .expect("write hello");

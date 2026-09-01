@@ -310,6 +310,7 @@ fn direct_eligibility_is_installed_with_the_client_connection() {
 
     assert!(server.handle_server_event(ServerEvent::ClientConnected {
         client_id: 7,
+        file_transfer_dir: String::new(),
         cols: 80,
         rows: 24,
         cell_width_px: 10,

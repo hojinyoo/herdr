@@ -582,6 +582,7 @@ impl App {
             file_transfer: None,
             file_browser: None,
             request_file_browser: false,
+            client_file_transfer_dir: String::new(),
             request_client_config_reload: false,
             request_clipboard_write: None,
             creating_new_tab: false,

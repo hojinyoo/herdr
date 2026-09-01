@@ -242,15 +242,32 @@ pub(super) fn render_file_transfer_prompt(app: &AppState, frame: &mut Frame, are
 pub(crate) const FILE_BROWSER_POPUP_WIDTH: u16 = 72;
 pub(crate) const FILE_BROWSER_POPUP_HEIGHT: u16 = 18;
 
-/// Scrolls the window so the cursor stays visible without jumping.
-pub(crate) fn file_browser_window_start(position: usize, total: usize, visible: usize) -> usize {
-    if visible == 0 || total <= visible {
-        return 0;
+/// The list body of the browser popup, in screen coordinates, or `None` when the
+/// popup is too small to draw. Mouse hit-testing and the renderer must agree, so
+/// both derive the rows from here.
+pub(crate) fn file_browser_list_rect(area: Rect) -> Option<Rect> {
+    let popup = centered_popup_rect(area, FILE_BROWSER_POPUP_WIDTH, FILE_BROWSER_POPUP_HEIGHT)?;
+    let inner = Rect::new(
+        popup.x + 1,
+        popup.y + 1,
+        popup.width.saturating_sub(2),
+        popup.height.saturating_sub(2),
+    );
+    if inner.height < 6 {
+        return None;
     }
-    let half = visible / 2;
-    position
-        .saturating_sub(half)
-        .min(total.saturating_sub(visible))
+    Some(browser_rows(inner)[3])
+}
+
+fn browser_rows(inner: Rect) -> [Rect; 5] {
+    Layout::vertical([
+        Constraint::Length(1), // title
+        Constraint::Length(1), // cwd
+        Constraint::Length(1), // filter / destination
+        Constraint::Min(1),    // list
+        Constraint::Length(1), // footer
+    ])
+    .areas::<5>(inner)
 }
 
 pub(super) fn render_file_transfer_browser(app: &AppState, frame: &mut Frame, area: Rect) {
@@ -272,14 +289,7 @@ pub(super) fn render_file_transfer_browser(app: &AppState, frame: &mut Frame, ar
         return;
     }
 
-    let rows = Layout::vertical([
-        Constraint::Length(1), // title
-        Constraint::Length(1), // cwd
-        Constraint::Length(1), // filter
-        Constraint::Min(1),    // list
-        Constraint::Length(1), // footer
-    ])
-    .areas::<5>(inner);
+    let rows = browser_rows(inner);
 
     render_modal_header(frame, rows[0], "receive file", &app.palette);
 
@@ -294,13 +304,13 @@ pub(super) fn render_file_transfer_browser(app: &AppState, frame: &mut Frame, ar
         rows[1],
     );
 
-    let filter = if browser.query.is_empty() {
-        // The destination is client-side config, so the server cannot show the
-        // resolved path without the client reporting it. Naming the key is what
-        // actually answers "how do I change this", and it can never be wrong.
-        "→ remote.file_transfer_dir on your machine (default ~/Downloads)".to_owned()
-    } else {
+    let filter = if !browser.query.is_empty() {
         format!("filter: {}", browser.query)
+    } else if browser.destination.is_empty() {
+        // No client reported one, so name the setting rather than guess a path.
+        "→ set remote.file_transfer_dir on your machine".to_owned()
+    } else {
+        format!("→ {}", browser.destination)
     };
     let filter_style = if browser.query.is_empty() {
         Style::default().fg(app.palette.surface_dim)
@@ -355,11 +365,7 @@ fn render_file_browser_list(
     }
 
     let visible = area.height as usize;
-    let position = indices
-        .iter()
-        .position(|idx| *idx == browser.selected)
-        .unwrap_or(0);
-    let start = file_browser_window_start(position, indices.len(), visible);
+    let start = browser.window_start(visible);
 
     for (row, entry_idx) in indices.iter().skip(start).take(visible).enumerate() {
         let Some(entry) = browser.entries.get(*entry_idx) else {

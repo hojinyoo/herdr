@@ -462,6 +462,9 @@ impl App {
                     MouseAction::FileTransferModal(action) => {
                         modal::apply_file_transfer_mouse_action(&mut self.state, action)
                     }
+                    MouseAction::FileBrowserActivate => {
+                        modal::activate_file_browser_selection(&mut self.state)
+                    }
                     MouseAction::ConfirmCloseAccept => self.confirm_close_accept_via_api(),
                     MouseAction::ContextMenu { menu, idx } => {
                         self.apply_context_menu_action_via_api(menu, idx)
@@ -872,7 +875,7 @@ fn app_for_mouse_test() -> App {
 
 #[cfg(test)]
 pub(super) fn open_file_transfer_browser_for_test(state: &mut AppState, dir: std::path::PathBuf) {
-    modal::open_file_transfer_browser(state, dir);
+    modal::open_file_transfer_browser(state, dir, "/home/me/Downloads".to_owned());
 }
 
 #[cfg(test)]

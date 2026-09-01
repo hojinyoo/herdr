@@ -71,6 +71,9 @@ pub(crate) struct ClientConnection {
     pub(crate) host_keyboard_report_all_active: Option<bool>,
     /// Temporary files staged from this client's local clipboard image pastes.
     pub(crate) staged_clipboard_files: Vec<PathBuf>,
+    /// Where this client writes received files, as it resolved the setting.
+    /// Empty for connections that never sent it (direct attach, tests).
+    pub(crate) file_transfer_dir: String,
     /// Channels for sending framed ServerMessage data to the client writer thread.
     pub(crate) writer: Option<ClientWriter>,
 }
@@ -136,6 +139,7 @@ impl ClientConnection {
             host_sgr_pixels_active: None,
             host_keyboard_report_all_active: None,
             staged_clipboard_files: Vec::new(),
+            file_transfer_dir: String::new(),
             writer,
         }
     }

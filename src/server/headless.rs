@@ -1032,6 +1032,17 @@ impl HeadlessServer {
             crate::render_prof::event("full_render_cause.config_reload");
         }
 
+        // The destination is client-side config, so the TUI can only show what the
+        // foreground client reported at handshake.
+        let foreground_dir = self
+            .foreground_client_id
+            .and_then(|id| self.clients.get(&id))
+            .map(|client| client.file_transfer_dir.clone())
+            .unwrap_or_default();
+        if self.app.state.client_file_transfer_dir != foreground_dir {
+            self.app.state.client_file_transfer_dir = foreground_dir;
+        }
+
         if std::mem::take(&mut self.app.state.request_file_browser) {
             self.app.open_file_transfer_browser_at_focus();
             needs_render = true;
@@ -3022,6 +3033,7 @@ impl HeadlessServer {
         match ev {
             ServerEvent::ClientConnected {
                 client_id,
+                file_transfer_dir,
                 cols,
                 rows,
                 cell_width_px,
@@ -3071,6 +3083,7 @@ impl HeadlessServer {
                     direct_attach_requested,
                     Some(writer),
                 );
+                connection.file_transfer_dir = file_transfer_dir;
                 connection.direct_graphics = direct_graphics;
                 connection.pixel_mouse = direct_graphics;
                 self.clients.insert(client_id, connection);
@@ -6593,6 +6606,7 @@ mod tests {
         let (writer_a, _control_a, _render_a) = test_client_writer();
         assert!(server.handle_server_event(ServerEvent::ClientConnected {
             client_id: 1,
+            file_transfer_dir: String::new(),
             cols: 80,
             rows: 24,
             cell_width_px: 10,
@@ -6610,6 +6624,7 @@ mod tests {
         let (writer_b, _control_b, _render_b) = test_client_writer();
         assert!(server.handle_server_event(ServerEvent::ClientConnected {
             client_id: 2,
+            file_transfer_dir: String::new(),
             cols: 80,
             rows: 24,
             cell_width_px: 10,
@@ -6640,6 +6655,7 @@ new_tab = "prefix+t"
 
         assert!(server.handle_server_event(ServerEvent::ClientConnected {
             client_id: 1,
+            file_transfer_dir: String::new(),
             cols: 80,
             rows: 24,
             cell_width_px: 0,
@@ -6665,6 +6681,7 @@ new_tab = "prefix+t"
 
         assert!(server.handle_server_event(ServerEvent::ClientConnected {
             client_id: 2,
+            file_transfer_dir: String::new(),
             cols: 80,
             rows: 24,
             cell_width_px: 0,
@@ -6706,6 +6723,7 @@ new_tab = "prefix+t"
 
         assert!(server.handle_server_event(ServerEvent::ClientConnected {
             client_id: 1,
+            file_transfer_dir: String::new(),
             cols: 80,
             rows: 24,
             cell_width_px: 0,
@@ -6720,6 +6738,7 @@ new_tab = "prefix+t"
 
         assert!(server.handle_server_event(ServerEvent::ClientConnected {
             client_id: 2,
+            file_transfer_dir: String::new(),
             cols: 80,
             rows: 24,
             cell_width_px: 0,
@@ -6764,6 +6783,7 @@ next_tab = ""
         let (writer, _control, _render) = test_client_writer();
         assert!(server.handle_server_event(ServerEvent::ClientConnected {
             client_id: 1,
+            file_transfer_dir: String::new(),
             cols: 80,
             rows: 24,
             cell_width_px: 0,
@@ -6840,6 +6860,7 @@ next_tab = ""
 
         assert!(server.handle_server_event(ServerEvent::ClientConnected {
             client_id: 1,
+            file_transfer_dir: String::new(),
             cols: 80,
             rows: 24,
             cell_width_px: 0,
@@ -6861,6 +6882,7 @@ next_tab = ""
 
         assert!(server.handle_server_event(ServerEvent::ClientConnected {
             client_id: 2,
+            file_transfer_dir: String::new(),
             cols: 80,
             rows: 24,
             cell_width_px: 0,
@@ -6896,6 +6918,7 @@ next_tab = ""
 
         assert!(server.handle_server_event(ServerEvent::ClientConnected {
             client_id: 7,
+            file_transfer_dir: String::new(),
             cols: 80,
             rows: 24,
             cell_width_px: 0,
@@ -6962,6 +6985,7 @@ next_tab = ""
         let (writer, control_rx, _render_rx) = test_client_writer();
         assert!(server.handle_server_event(ServerEvent::ClientConnected {
             client_id,
+            file_transfer_dir: String::new(),
             cols: 100,
             rows: 30,
             cell_width_px: 0,
@@ -7376,6 +7400,7 @@ next_tab = ""
 
         assert!(server.handle_server_event(ServerEvent::ClientConnected {
             client_id: 7,
+            file_transfer_dir: String::new(),
             cols: 80,
             rows: 24,
             cell_width_px: 0,
@@ -7411,6 +7436,7 @@ next_tab = ""
 
         assert!(server.handle_server_event(ServerEvent::ClientConnected {
             client_id: 7,
+            file_transfer_dir: String::new(),
             cols: 80,
             rows: 24,
             cell_width_px: 0,
@@ -7445,6 +7471,7 @@ next_tab = ""
 
         assert!(server.handle_server_event(ServerEvent::ClientConnected {
             client_id: 7,
+            file_transfer_dir: String::new(),
             cols: 80,
             rows: 24,
             cell_width_px: 0,
@@ -7546,6 +7573,7 @@ next_tab = ""
 
         assert!(server.handle_server_event(ServerEvent::ClientConnected {
             client_id: 7,
+            file_transfer_dir: String::new(),
             cols: 80,
             rows: 24,
             cell_width_px: 0,
@@ -9597,6 +9625,7 @@ next_tab = ""
         let (writer, _control_rx, _render_rx) = test_client_writer();
         assert!(server.handle_server_event(ServerEvent::ClientConnected {
             client_id: 2,
+            file_transfer_dir: String::new(),
             cols: 80,
             rows: 24,
             cell_width_px: 0,

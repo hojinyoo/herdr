@@ -383,6 +383,10 @@ pub enum ClientMessage {
         keybindings: ClientKeybindings,
         /// Whether this connection will render the full app or attach directly to a pane terminal.
         launch_mode: ClientLaunchMode,
+        /// Where this client writes received files, already resolved on the
+        /// client. The server renders the receive UI but the setting is
+        /// client-side, so it cannot name the destination without being told.
+        file_transfer_dir: String,
     },
 
     /// Raw input bytes read from the client's stdin.
@@ -1134,6 +1138,7 @@ mod tests {
             requested_encoding: RenderEncoding::SemanticFrame,
             keybindings: ClientKeybindings::Server,
             launch_mode: ClientLaunchMode::App,
+            file_transfer_dir: String::new(),
         };
         let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
         let (decoded, _): (ClientMessage, _) =
@@ -1171,6 +1176,7 @@ mod tests {
                 requested_encoding: RenderEncoding::SemanticFrame,
                 keybindings: ClientKeybindings::Server,
                 launch_mode: ClientLaunchMode::App,
+                file_transfer_dir: String::new(),
             }),
             0
         );
@@ -2014,6 +2020,7 @@ mod tests {
             requested_encoding: RenderEncoding::SemanticFrame,
             keybindings: ClientKeybindings::Server,
             launch_mode: ClientLaunchMode::App,
+            file_transfer_dir: String::new(),
         };
         let mut buf = Vec::new();
         write_message(&mut buf, &msg).unwrap();
@@ -2088,6 +2095,7 @@ mod tests {
                     requested_encoding: RenderEncoding::SemanticFrame,
                     keybindings: ClientKeybindings::Server,
                     launch_mode: ClientLaunchMode::App,
+                    file_transfer_dir: String::new(),
                 },
                 1 => ClientMessage::Input {
                     data: vec![(i % 256) as u8; (i as usize % 50) + 1],
@@ -2524,6 +2532,7 @@ mod tests {
             requested_encoding: RenderEncoding::SemanticFrame,
             keybindings: ClientKeybindings::Server,
             launch_mode: ClientLaunchMode::App,
+            file_transfer_dir: String::new(),
         };
         let mut buf = Vec::new();
         write_message(&mut buf, &msg).unwrap();
@@ -2560,6 +2569,7 @@ mod tests {
                 requested_encoding: RenderEncoding::SemanticFrame,
                 keybindings: ClientKeybindings::Server,
                 launch_mode: ClientLaunchMode::App,
+                file_transfer_dir: String::new(),
             },
             ClientMessage::Input {
                 data: b"hello world".to_vec(),

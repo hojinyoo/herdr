@@ -56,7 +56,7 @@ fn busy(transfer_id: u64) -> ClientMessage {
 
 /// Where received files land. Client-local by definition: the server never sees
 /// this path, and "wherever the client happened to be started" is not an answer.
-fn download_dir() -> PathBuf {
+pub(super) fn download_dir() -> PathBuf {
     let configured = crate::config::load_live_config()
         .map(|loaded| loaded.config.remote.file_transfer_dir)
         .unwrap_or_default();

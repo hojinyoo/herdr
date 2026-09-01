@@ -155,6 +155,10 @@ pub(super) fn apply_global_menu_action(state: &mut AppState, action: GlobalMenuA
 }
 
 impl App {
+    fn client_file_transfer_dir(&self) -> String {
+        self.state.client_file_transfer_dir.clone()
+    }
+
     /// Opens the receive browser at the pane's working directory, falling back to
     /// the process cwd when the pane has none.
     pub(crate) fn open_file_transfer_browser_at_pane(
@@ -170,7 +174,8 @@ impl App {
             .and_then(|tab| tab.foreground_cwd_for_pane(pane_id, &self.terminal_runtimes))
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_else(|| std::path::PathBuf::from("/"));
-        open_file_transfer_browser(&mut self.state, start);
+        let destination = self.client_file_transfer_dir();
+        open_file_transfer_browser(&mut self.state, start, destination);
     }
 
     /// Same, for the focused pane — used by the global menu, which has no pane.
@@ -187,7 +192,8 @@ impl App {
             None => {
                 let start =
                     std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"));
-                open_file_transfer_browser(&mut self.state, start);
+                let destination = self.client_file_transfer_dir();
+                open_file_transfer_browser(&mut self.state, start, destination);
             }
         }
     }
@@ -195,7 +201,11 @@ impl App {
 
 /// Opens the receive browser at `start`, or falls back to the path prompt when
 /// the directory cannot be listed at all.
-pub(super) fn open_file_transfer_browser(state: &mut AppState, start: std::path::PathBuf) {
+pub(super) fn open_file_transfer_browser(
+    state: &mut AppState,
+    start: std::path::PathBuf,
+    destination: String,
+) {
     state.file_transfer = Some(FileTransferState {
         direction: FileTransferDirection::Download,
         name: String::new(),
@@ -211,6 +221,7 @@ pub(super) fn open_file_transfer_browser(state: &mut AppState, start: std::path:
         show_hidden: false,
         error: None,
         truncated: false,
+        destination,
     });
     refresh_file_browser(state);
     state.mode = Mode::FileTransferBrowse;
@@ -264,7 +275,7 @@ fn close_file_browser(state: &mut AppState) {
 }
 
 /// Enter: descend into a directory, or pick a file and start the transfer.
-fn activate_file_browser_selection(state: &mut AppState) {
+pub(super) fn activate_file_browser_selection(state: &mut AppState) {
     let Some(browser) = state.file_browser.as_ref() else {
         return;
     };
@@ -2993,7 +3004,7 @@ mod tests {
     fn the_browser_lists_dirs_first_and_hides_dotfiles_until_toggled() {
         let dir = browser_fixture("list");
         let mut state = AppState::test_new();
-        open_file_transfer_browser(&mut state, dir.clone());
+        open_file_transfer_browser(&mut state, dir.clone(), "/home/me/Downloads".to_owned());
 
         let browser = state.file_browser.as_ref().expect("browser");
         let names: Vec<&str> = browser.entries.iter().map(|e| e.name.as_str()).collect();
@@ -3022,7 +3033,7 @@ mod tests {
     fn typing_filters_and_keeps_the_cursor_on_a_visible_row() {
         let dir = browser_fixture("filter");
         let mut state = AppState::test_new();
-        open_file_transfer_browser(&mut state, dir.clone());
+        open_file_transfer_browser(&mut state, dir.clone(), "/home/me/Downloads".to_owned());
 
         for ch in "beta".chars() {
             handle_file_transfer_browse_key(&mut state, key(KeyCode::Char(ch)));
@@ -3046,7 +3057,7 @@ mod tests {
     fn enter_descends_into_a_directory_and_left_goes_back_up() {
         let dir = browser_fixture("descend");
         let mut state = AppState::test_new();
-        open_file_transfer_browser(&mut state, dir.clone());
+        open_file_transfer_browser(&mut state, dir.clone(), "/home/me/Downloads".to_owned());
 
         // ".." is row 0, "sub" is row 1.
         handle_file_transfer_browse_key(&mut state, key(KeyCode::Down));
@@ -3069,7 +3080,7 @@ mod tests {
     fn selecting_a_file_starts_the_download_with_its_full_path() {
         let dir = browser_fixture("select");
         let mut state = AppState::test_new();
-        open_file_transfer_browser(&mut state, dir.clone());
+        open_file_transfer_browser(&mut state, dir.clone(), "/home/me/Downloads".to_owned());
 
         for ch in "alpha".chars() {
             handle_file_transfer_browse_key(&mut state, key(KeyCode::Char(ch)));
@@ -3100,7 +3111,7 @@ mod tests {
     fn escape_closes_the_browser_without_starting_anything() {
         let dir = browser_fixture("escape");
         let mut state = AppState::test_new();
-        open_file_transfer_browser(&mut state, dir.clone());
+        open_file_transfer_browser(&mut state, dir.clone(), "/home/me/Downloads".to_owned());
         handle_file_transfer_browse_key(&mut state, key(KeyCode::Esc));
 
         assert!(state.file_browser.is_none());
@@ -3113,7 +3124,11 @@ mod tests {
     #[test]
     fn an_unreadable_directory_keeps_the_browser_open_with_an_error() {
         let mut state = AppState::test_new();
-        open_file_transfer_browser(&mut state, std::path::PathBuf::from("/definitely/not/here"));
+        open_file_transfer_browser(
+            &mut state,
+            std::path::PathBuf::from("/definitely/not/here"),
+            "/home/me/Downloads".to_owned(),
+        );
         let browser = state.file_browser.as_ref().expect("browser stays open");
         assert!(browser.error.is_some(), "the failure must be visible");
         assert_eq!(state.mode, Mode::FileTransferBrowse);

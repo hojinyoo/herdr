@@ -1380,6 +1380,9 @@ pub struct FileBrowserState {
     /// True when the listing was capped, so the footer can say so rather than
     /// silently showing a partial directory.
     pub truncated: bool,
+    /// Where the selected file will land, as the client resolved it. Empty when
+    /// no client reported one, in which case the UI names the setting instead.
+    pub destination: String,
 }
 
 /// Directories with more entries than this are listed partially. Reading is
@@ -1427,6 +1430,28 @@ impl FileBrowserState {
             .position(|idx| *idx == self.selected)
             .unwrap_or(0);
         self.selected = indices[pos.saturating_sub(1)];
+    }
+
+    /// First filtered row shown in a list `visible` rows tall. Shared by the
+    /// renderer and mouse hit-testing so a click lands on the row it looks like.
+    pub(crate) fn window_start(&self, visible: usize) -> usize {
+        let indices = self.filtered_indices();
+        if visible == 0 || indices.len() <= visible {
+            return 0;
+        }
+        let position = indices
+            .iter()
+            .position(|idx| *idx == self.selected)
+            .unwrap_or(0);
+        position
+            .saturating_sub(visible / 2)
+            .min(indices.len().saturating_sub(visible))
+    }
+
+    /// The entry drawn at `row` of the visible window, if any.
+    pub(crate) fn entry_at_row(&self, row: usize, visible: usize) -> Option<usize> {
+        let indices = self.filtered_indices();
+        indices.get(self.window_start(visible) + row).copied()
     }
 
     /// Keeps the cursor on a row that survives the current filter.
@@ -1622,6 +1647,10 @@ pub struct AppState {
     /// Set by the global menu, which has no pane in hand; drained by the app so
     /// the browser can start at the focused pane's directory.
     pub request_file_browser: bool,
+    /// Mirror of the foreground client's resolved download directory. Server
+    /// owned: the setting is client-side, so the TUI can only display what the
+    /// client reported at handshake.
+    pub client_file_transfer_dir: String,
     /// Set when the headless server should ask attached clients to reload
     /// their client-local sound config from disk.
     pub request_client_config_reload: bool,
@@ -2016,6 +2045,7 @@ impl AppState {
             file_transfer: None,
             file_browser: None,
             request_file_browser: false,
+            client_file_transfer_dir: String::new(),
             request_client_config_reload: false,
             request_clipboard_write: None,
             creating_new_tab: false,

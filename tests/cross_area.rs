@@ -414,6 +414,13 @@ fn decode_varint_u32(payload: &[u8], offset: usize) -> Result<(u32, usize), Stri
     }
 }
 
+/// bincode encodes a String as a varint length followed by its bytes.
+fn encode_string(value: &str) -> Vec<u8> {
+    let mut out = encode_varint_u32(value.len() as u32);
+    out.extend_from_slice(value.as_bytes());
+    out
+}
+
 fn client_handshake(stream: &mut UnixStream, version: u32, cols: u16, rows: u16) {
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
@@ -429,6 +436,7 @@ fn client_handshake(stream: &mut UnixStream, version: u32, cols: u16, rows: u16)
     payload.extend_from_slice(&encode_varint_u32(0)); // RenderEncoding::SemanticFrame
     payload.extend_from_slice(&encode_varint_u32(0)); // ClientKeybindings::Server
     payload.extend_from_slice(&encode_varint_u32(0)); // ClientLaunchMode::App
+    payload.extend_from_slice(&encode_string("")); // file_transfer_dir
 
     stream
         .write_all(&frame_message(&payload))
