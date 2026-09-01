@@ -295,7 +295,10 @@ pub(super) fn render_file_transfer_browser(app: &AppState, frame: &mut Frame, ar
     );
 
     let filter = if browser.query.is_empty() {
-        "type to filter".to_owned()
+        // The destination is client-side config, so the server cannot show the
+        // resolved path without the client reporting it. Naming the key is what
+        // actually answers "how do I change this", and it can never be wrong.
+        "→ remote.file_transfer_dir on your machine (default ~/Downloads)".to_owned()
     } else {
         format!("filter: {}", browser.query)
     };
@@ -322,11 +325,11 @@ pub(super) fn render_file_transfer_browser(app: &AppState, frame: &mut Frame, ar
 
     let footer = if browser.truncated {
         format!(
-            "↑↓ move   ↵ open/select   ^h hidden   esc cancel   (first {} shown)",
+            "↑↓ move   ↵ open/select   . hidden   esc cancel   (first {} shown)",
             crate::app::state::FILE_BROWSER_MAX_ENTRIES
         )
     } else {
-        "↑↓ move   ↵ open/select   ^h hidden   esc cancel".to_owned()
+        "↑↓ move   ↵ open/select   . hidden   esc cancel".to_owned()
     };
     frame.render_widget(
         Paragraph::new(truncate_end(&footer, rows[4].width as usize))

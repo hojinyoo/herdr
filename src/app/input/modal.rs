@@ -298,6 +298,13 @@ fn activate_file_browser_selection(state: &mut AppState) {
     state.mode = Mode::FileTransferProgress;
 }
 
+fn toggle_file_browser_hidden(state: &mut AppState) {
+    if let Some(browser) = state.file_browser.as_mut() {
+        browser.show_hidden = !browser.show_hidden;
+    }
+    refresh_file_browser(state);
+}
+
 pub(crate) fn handle_file_transfer_browse_key(state: &mut AppState, key: KeyEvent) {
     match key.code {
         KeyCode::Esc => close_file_browser(state),
@@ -326,17 +333,24 @@ pub(crate) fn handle_file_transfer_browse_key(state: &mut AppState, key: KeyEven
             }
         }
         KeyCode::Right => activate_file_browser_selection(state),
+        // `.` is the file-manager convention and always reaches us. Ctrl+H is
+        // accepted as an alias, but cannot be relied on: terminals send it as
+        // 0x08, which is also Backspace, so depending on the emulator it arrives
+        // as `Backspace` (with or without CONTROL) rather than `Ctrl+H`. All
+        // three spellings toggle; bare Backspace still edits the filter.
+        KeyCode::Char('.') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            toggle_file_browser_hidden(state);
+        }
+        KeyCode::Char('h') | KeyCode::Backspace
+            if key.modifiers.contains(KeyModifiers::CONTROL) =>
+        {
+            toggle_file_browser_hidden(state);
+        }
         KeyCode::Backspace => {
             if let Some(browser) = state.file_browser.as_mut() {
                 browser.query.pop();
                 browser.clamp_selection();
             }
-        }
-        KeyCode::Char('h') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            if let Some(browser) = state.file_browser.as_mut() {
-                browser.show_hidden = !browser.show_hidden;
-            }
-            refresh_file_browser(state);
         }
         KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
             if let Some(browser) = state.file_browser.as_mut() {
