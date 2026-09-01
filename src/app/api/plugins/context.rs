@@ -326,7 +326,9 @@ impl App {
         pane_id: crate::layout::PaneId,
         correlation_id: &str,
     ) -> PluginInvocationContext {
-        let ws = &self.state.workspaces[ws_idx];
+        let Some(ws) = self.state.workspaces.get(ws_idx) else {
+            return empty_plugin_context(correlation_id);
+        };
         let workspace = self.workspace_info(ws_idx);
         let tab_idx = ws
             .find_tab_index_for_pane(pane_id)

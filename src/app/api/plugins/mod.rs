@@ -277,7 +277,7 @@ impl App {
         )
         .map_err(|(_, message)| message)?;
         if self.state.workspaces.get(ws_idx).is_none() {
-            return Err("context menu workspace is gone".to_string());
+            return Err("context menu target workspace is gone".to_string());
         }
         let mut context = match pane_id {
             Some(pane_id) => self.plugin_context_for_pane(ws_idx, pane_id, "context_menu"),
@@ -731,10 +731,10 @@ fn manifest_action_info(
     }
 }
 
-/// Actions a context menu may offer for `context`: declared for that context by
-/// an enabled plugin, and runnable on this platform. Sorted by qualified id so
-/// menu order does not follow the registry's hash order.
-pub(crate) fn menu_actions_for_context(
+/// Actions eligible for `context`: declared for it by an enabled plugin, and
+/// runnable on this platform. Sorted by qualified id so the order does not
+/// follow the registry's hash order.
+pub(crate) fn actions_for_context(
     plugins: &crate::app::state::InstalledPluginRegistry,
     context: crate::api::schema::PluginActionContext,
 ) -> Vec<PluginActionInfo> {
@@ -2617,7 +2617,7 @@ command = ["sh", "-c", "printf '%s' \"$HERDR_PLUGIN_CONTEXT_JSON\" > {}"]
     #[cfg(unix)]
     #[test]
     fn context_menu_action_uses_clicked_workspace_not_active() {
-        use crate::app::state::{ContextMenuKind, ContextMenuState, MenuListState};
+        use crate::app::state::{ContextMenuKind, ContextMenuState};
 
         let mut app = test_app();
         app.state.workspaces = vec![
@@ -2652,14 +2652,14 @@ command = ["sh", "-c", "printf '%s' \"$HERDR_PLUGIN_CONTEXT_JSON\" > {}"]
         );
         link_manifest(&mut app, &root);
 
-        let menu = ContextMenuState {
-            kind: ContextMenuKind::Workspace { ws_idx: 1 },
-            x: 0,
-            y: 0,
-            list: MenuListState::new(0),
-        };
+        let menu = ContextMenuState::new(
+            ContextMenuKind::Workspace { ws_idx: 1 },
+            0,
+            0,
+            &app.state.installed_plugins,
+        );
         let idx = menu
-            .items(&app.state.installed_plugins)
+            .items()
             .iter()
             .position(|item| item.label() == "Worktree status")
             .expect("plugin action listed in workspace context menu");
@@ -2681,6 +2681,8 @@ command = ["sh", "-c", "printf '%s' \"$HERDR_PLUGIN_CONTEXT_JSON\" > {}"]
         assert_eq!(context.invocation_source.as_deref(), Some("context_menu"));
 
         let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(super::env::plugin_config_dir("example.menu-context"));
+        let _ = std::fs::remove_dir_all(super::env::plugin_state_dir("example.menu-context"));
     }
 
     #[test]

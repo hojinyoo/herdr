@@ -297,8 +297,8 @@ pub(super) fn render_context_menu(app: &AppState, frame: &mut Frame) {
     };
 
     let items: Vec<ListItem> = menu
-        .items(&app.installed_plugins)
-        .into_iter()
+        .items()
+        .iter()
         .map(|item| ListItem::new(Line::from(item.label().to_string())))
         .collect();
     let list = List::new(items)
@@ -310,6 +310,8 @@ pub(super) fn render_context_menu(app: &AppState, frame: &mut Frame) {
                 .add_modifier(Modifier::BOLD),
         )
         .highlight_symbol(" ");
-    let mut state = ListState::default().with_selected(Some(menu.list.highlighted));
+    let mut state = ListState::default()
+        .with_offset(menu.offset())
+        .with_selected(Some(menu.list.highlighted));
     frame.render_stateful_widget(list, inner, &mut state);
 }
