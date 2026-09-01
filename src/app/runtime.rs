@@ -155,12 +155,14 @@ impl App {
                     let current_context = self.terminal_input_context();
                     if !self.input_leases.reprocess_allowed(
                         lease_key,
-                        &context,
+                        context.as_ref(),
                         current_context.as_ref(),
                         tracked,
                     ) {
                         break;
                     }
+                    // `handle_key` already routes modal keys itself, so unlike the
+                    // headless path this needs no separate modal branch.
                     if let Some(target) = self.handle_key(key.clone()).await {
                         if tracked {
                             self.input_leases.insert_forwarded(

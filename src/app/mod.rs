@@ -1738,11 +1738,17 @@ impl App {
                     let current_context = self.terminal_input_context();
                     if !self.input_leases.reprocess_allowed(
                         lease_key,
-                        &context,
+                        context.as_ref(),
                         current_context.as_ref(),
                         tracked,
                     ) {
                         break;
+                    }
+                    if context.is_none() {
+                        // A modal handled the press, so the repeat belongs to the
+                        // modal too — there is no pane to forward it to.
+                        self.handle_non_terminal_key_headless(key.clone());
+                        continue;
                     }
                     if let Some(target) =
                         self.handle_terminal_key_headless_from(source_id, key.clone())
