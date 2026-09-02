@@ -989,7 +989,6 @@ pub(crate) fn handle_context_menu_key(
                 let len = menu.items().len();
                 menu.list.move_next(len);
             }
-            state.sync_context_menu_offset();
         }
         KeyCode::Enter => {
             if let Some(menu) = state.context_menu.take() {
@@ -1186,16 +1185,10 @@ impl App {
                 }
             }
             KeyCode::Down => {
-                let len = self
-                    .state
-                    .context_menu
-                    .as_ref()
-                    .map(|menu| menu.items().len())
-                    .unwrap_or(0);
                 if let Some(menu) = &mut self.state.context_menu {
+                    let len = menu.items().len();
                     menu.list.move_next(len);
                 }
-                self.state.sync_context_menu_offset();
             }
             KeyCode::Enter => {
                 if let Some(menu) = self.state.context_menu.take() {

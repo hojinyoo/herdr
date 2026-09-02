@@ -279,6 +279,13 @@ impl App {
         if self.state.workspaces.get(ws_idx).is_none() {
             return Err("context menu target workspace is gone".to_string());
         }
+        // Without this the context ships focused_pane_id: null and the plugin
+        // falls back to whatever pane is focused - the hazard the docs warn of.
+        if let Some(pane_id) = pane_id {
+            if self.pane_info(ws_idx, pane_id).is_none() {
+                return Err("context menu target pane is gone".to_string());
+            }
+        }
         let mut context = match pane_id {
             Some(pane_id) => self.plugin_context_for_pane(ws_idx, pane_id, "context_menu"),
             None => self.plugin_context_for_workspace(ws_idx, "context_menu"),
@@ -750,7 +757,7 @@ pub(crate) fn actions_for_context(
         .filter(|action| action.contexts.contains(&context))
         .filter(|action| platform_supported(&action.platforms))
         .collect::<Vec<_>>();
-    actions.sort_by_key(|action| action.qualified_id());
+    actions.sort_by_cached_key(|action| action.qualified_id());
     actions
 }
 
@@ -2683,6 +2690,53 @@ command = ["sh", "-c", "printf '%s' \"$HERDR_PLUGIN_CONTEXT_JSON\" > {}"]
         let _ = std::fs::remove_dir_all(root);
         let _ = std::fs::remove_dir_all(super::env::plugin_config_dir("example.menu-context"));
         let _ = std::fs::remove_dir_all(super::env::plugin_state_dir("example.menu-context"));
+    }
+
+    /// A pane that closed while the menu was open must fail loudly. Falling
+    /// through would ship focused_pane_id: null and the plugin would act on
+    /// whatever pane happens to be focused.
+    #[cfg(unix)]
+    #[test]
+    fn context_menu_invocation_rejects_a_pane_that_is_gone() {
+        let mut app = test_app();
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("only")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+
+        let root = unique_temp_path("plugin-menu-dead-pane");
+        write_manifest_content(
+            &root,
+            r#"
+id = "example.dead-pane"
+name = "Dead Pane"
+version = "0.1.0"
+min_herdr_version = "0.6.10"
+
+[[actions]]
+id = "inspect"
+title = "Inspect pane"
+contexts = ["pane"]
+command = ["sh", "-c", "true"]
+"#,
+        );
+        link_manifest(&mut app, &root);
+
+        let live = app.state.workspaces[0]
+            .focused_pane_id()
+            .expect("focused pane");
+        let dead = crate::layout::PaneId::alloc();
+
+        assert!(app
+            .invoke_plugin_action_from_context_menu("example.dead-pane.inspect", 0, Some(live))
+            .is_ok());
+        let err = app
+            .invoke_plugin_action_from_context_menu("example.dead-pane.inspect", 0, Some(dead))
+            .expect_err("a closed pane must not silently degrade to the active tab");
+        assert!(err.contains("pane"), "unexpected error: {err}");
+
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(super::env::plugin_config_dir("example.dead-pane"));
+        let _ = std::fs::remove_dir_all(super::env::plugin_state_dir("example.dead-pane"));
     }
 
     #[test]

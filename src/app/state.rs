@@ -1388,10 +1388,12 @@ fn build_context_menu_items(
                 .into_iter()
                 .map(|action| {
                     let action_id = action.qualified_id();
-                    ContextMenuItem::Plugin {
-                        label: action.title,
-                        action_id,
-                    }
+                    // Third-party text: bidi overrides could reorder a title to
+                    // read like a native row, and the length is otherwise
+                    // unbounded, which sizes the menu.
+                    let label = crate::app::tab_bar_status::sanitize_status_text(&action.title)
+                        .unwrap_or_else(|| action_id.clone());
+                    ContextMenuItem::Plugin { label, action_id }
                 }),
         );
     }
@@ -2959,6 +2961,73 @@ mod tests {
         assert_eq!(
             menu_labels(workspace_menu(&plugins).items()),
             &["Rename", "Close", "Delete worktree checkout..."]
+        );
+    }
+
+    #[test]
+    fn workspace_context_menu_skips_actions_inheriting_a_foreign_plugin_platform() {
+        let mut plugin = plugin_with_action(
+            "example.worktree",
+            true,
+            manifest_action(
+                "status",
+                "Worktree status",
+                vec![crate::api::schema::PluginActionContext::Workspace],
+                None,
+            ),
+        );
+        // An action with no platforms of its own inherits the plugin's, so the
+        // menu filter has to resolve them the same way the invoke path does or
+        // the row is listed here and only fails after the click.
+        plugin.platforms = Some(vec![foreign_platform()]);
+
+        assert_eq!(
+            menu_labels(workspace_menu(&registry(vec![plugin])).items()),
+            &["Rename", "Close", "Delete worktree checkout..."]
+        );
+    }
+
+    #[test]
+    fn plugin_titles_are_sanitized_before_they_reach_a_menu_row() {
+        let plugins = registry(vec![plugin_with_action(
+            "example.spoof",
+            true,
+            manifest_action(
+                "x",
+                "Close\u{202e} pane\u{200b}",
+                vec![crate::api::schema::PluginActionContext::Workspace],
+                None,
+            ),
+        )]);
+
+        let menu = workspace_menu(&plugins);
+        let label = menu.items().last().expect("plugin row").label();
+
+        assert!(
+            !label.chars().any(|c| c.is_control()
+                || matches!(c, '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}')),
+            "bidi/zero-width characters must not reach a menu row: {label:?}"
+        );
+    }
+
+    #[test]
+    fn a_plugin_title_that_sanitizes_away_falls_back_to_the_action_id() {
+        let plugins = registry(vec![plugin_with_action(
+            "example.spoof",
+            true,
+            manifest_action(
+                "x",
+                "\u{202e}\u{200b}",
+                vec![crate::api::schema::PluginActionContext::Workspace],
+                None,
+            ),
+        )]);
+
+        let menu = workspace_menu(&plugins);
+
+        assert_eq!(
+            menu.items().last().expect("plugin row").label(),
+            "example.spoof.x"
         );
     }
 

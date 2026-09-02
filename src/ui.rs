@@ -322,6 +322,7 @@ fn compute_view_internal(
         split_borders,
     };
     app.sync_copy_mode_search_geometry();
+    app.sync_context_menu_offset();
 }
 
 fn compute_mobile_view(
@@ -385,6 +386,7 @@ fn compute_mobile_view(
         split_borders,
     };
     app.sync_copy_mode_search_geometry();
+    app.sync_context_menu_offset();
 }
 
 /// Render the UI — reads AppState but does not mutate it.

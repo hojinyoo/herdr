@@ -1258,7 +1258,8 @@ impl AppState {
             .saturating_add(4)
             .max(14)
             .min(screen.width.max(1));
-        let menu_h = (items.len() as u16)
+        let menu_h = u16::try_from(items.len())
+            .unwrap_or(u16::MAX)
             .saturating_add(2)
             .min(screen.height.max(1));
         let x = menu.x.min(screen.x + screen.width.saturating_sub(menu_w));
@@ -1270,9 +1271,11 @@ impl AppState {
         crate::ui::confirm_close_popup_rect(self.view.terminal_area).unwrap_or_default()
     }
 
-    /// Keep the scrolled window in step with the highlighted row. Called after
-    /// anything that moves the highlight, because the hit test below resolves
-    /// screen rows through the same offset the list is drawn with.
+    /// Keep the scrolled window in step with the highlighted row. Called from
+    /// `compute_view` rather than from each key arm, so the stored offset is
+    /// always the one the last drawn frame used - which is what the hit test
+    /// below has to resolve against. Doing it per-keypress missed `Up` and
+    /// missed resizes, and every future highlight mover would have to remember.
     pub(crate) fn sync_context_menu_offset(&mut self) {
         let Some(rect) = self.context_menu_rect() else {
             return;
@@ -3227,23 +3230,49 @@ mod tests {
             count as u16 + 2 > area.height,
             "test needs a menu taller than the screen, got {count} items"
         );
-        for _ in 0..count {
-            if let Some(menu) = &mut state.context_menu {
-                menu.list.move_next(count);
-            }
-            state.sync_context_menu_offset();
-        }
+
+        scroll_context_menu_down(&mut state, area, count);
         assert!(
             state.context_menu.as_ref().expect("menu").offset() > 0,
             "menu should have scrolled"
         );
+        assert_context_menu_rows_are_clickable(&state, area);
 
+        // Back up: ratatui rescrolls to keep the highlight visible, so the
+        // stored offset has to follow it in this direction too.
+        for _ in 0..count {
+            if let Some(menu) = &mut state.context_menu {
+                menu.list.move_prev();
+            }
+            crate::ui::compute_view(&mut state, area);
+        }
+        assert_context_menu_rows_are_clickable(&state, area);
+
+        // Shrinking the screen under an already-scrolled menu moves the drawn
+        // window without touching the highlight.
+        scroll_context_menu_down(&mut state, area, count);
+        let smaller = Rect::new(0, 0, 80, 12);
+        crate::ui::compute_view(&mut state, smaller);
+        assert_context_menu_rows_are_clickable(&state, smaller);
+    }
+
+    fn scroll_context_menu_down(state: &mut AppState, area: Rect, count: usize) {
+        for _ in 0..count {
+            if let Some(menu) = &mut state.context_menu {
+                menu.list.move_next(count);
+            }
+            crate::ui::compute_view(state, area);
+        }
+    }
+
+    /// Every row the menu draws must hit-test back to the item drawn there.
+    fn assert_context_menu_rows_are_clickable(state: &AppState, area: Rect) {
         let rect = state.context_menu_rect().expect("menu rect");
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(area.width, area.height))
                 .expect("terminal");
         terminal
-            .draw(|frame| crate::ui::render(&state, frame))
+            .draw(|frame| crate::ui::render(state, frame))
             .expect("draw");
         let buffer = terminal.backend().buffer().clone();
 
