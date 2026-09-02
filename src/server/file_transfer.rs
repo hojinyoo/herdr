@@ -235,6 +235,7 @@ impl HeadlessServer {
         name: String,
         size: u64,
     ) -> bool {
+        self.note_transfer_progress(client_id, transfer_id);
         // Only a transfer this server asked for is accepted. Without this a
         // client could push an unprompted file into the focused pane's cwd.
         let dir = match self.file_transfer.as_ref() {
@@ -337,6 +338,10 @@ impl HeadlessServer {
         transfer_id: u64,
         seq: u32,
     ) -> bool {
+        // A download's only inbound traffic is acks, so without this the stall
+        // deadline is never refreshed and a healthy transfer is abandoned after
+        // `FILE_TRANSFER_STALL_TIMEOUT` — 256 MiB takes ~105s at 100ms RTT.
+        self.note_transfer_progress(client_id, transfer_id);
         {
             let Some(transfer) = self.file_transfer.as_mut() else {
                 return false;
@@ -583,6 +588,12 @@ impl HeadlessServer {
             },
         });
         id
+    }
+
+    /// Puts the first download chunk on the wire so a test can ack a real one.
+    #[cfg(test)]
+    pub(super) fn pump_download_for_test(&mut self) {
+        self.pump_download();
     }
 
     /// Ages the in-flight transfer past the stall deadline so a test can assert

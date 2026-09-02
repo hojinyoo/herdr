@@ -6,7 +6,9 @@ use ratatui::{
     Frame,
 };
 
-use super::text::{display_width_u16, middle_elide, take_suffix_width, truncate_end};
+use super::text::{
+    display_width, display_width_u16, middle_elide, take_suffix_width, truncate_end,
+};
 use super::widgets::{
     action_button_row_rects, centered_popup_rect, panel_contrast_fg, render_action_button,
     render_modal_header, render_modal_shell, render_panel_shell, ActionButtonSpec,
@@ -400,10 +402,12 @@ fn render_file_browser_list(
         } else {
             entry.name.clone()
         };
-        let line = format!(
-            " {marker} {:<name_width$} {size:>size_width$} ",
-            truncate_end(&name, name_width),
-        );
+        // Pad by display width, not char count: `truncate_end` clips on columns,
+        // so a CJK or emoji name has fewer chars than columns and `{:<width$}`
+        // would overshoot and push the size column off the end of the row.
+        let shown = truncate_end(&name, name_width);
+        let pad = " ".repeat(name_width.saturating_sub(display_width(&shown)));
+        let line = format!(" {marker} {shown}{pad} {size:>size_width$} ");
         frame.render_widget(
             Paragraph::new(truncate_end(&line, area.width as usize)).style(style),
             Rect::new(area.x, y, area.width, 1),

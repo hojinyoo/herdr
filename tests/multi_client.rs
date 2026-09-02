@@ -15,7 +15,7 @@ use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize}
 use serde::Deserialize;
 use serde_json::Value;
 use support::{
-    cleanup_test_base, register_runtime_dir, register_spawned_herdr_pid,
+    cleanup_test_base, encode_string, register_runtime_dir, register_spawned_herdr_pid,
     unregister_spawned_herdr_pid, CURRENT_PROTOCOL,
 };
 
@@ -429,13 +429,6 @@ fn encode_varint_u16(v: u16) -> Vec<u8> {
         buf.extend_from_slice(&v.to_le_bytes());
         buf
     }
-}
-
-/// bincode encodes a String as a varint length followed by its bytes.
-fn encode_string(value: &str) -> Vec<u8> {
-    let mut out = encode_varint_u32(value.len() as u32);
-    out.extend_from_slice(value.as_bytes());
-    out
 }
 
 fn encode_varint_enum(variant_idx: u32, fields: &[&[u8]]) -> Vec<u8> {

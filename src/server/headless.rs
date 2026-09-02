@@ -1037,10 +1037,12 @@ impl HeadlessServer {
         let foreground_dir = self
             .foreground_client_id
             .and_then(|id| self.clients.get(&id))
-            .map(|client| client.file_transfer_dir.clone())
+            .map(|client| client.file_transfer_dir.as_str())
             .unwrap_or_default();
+        // Borrowed, not cloned: this runs on every loop tick and the value
+        // changes only when the foreground client does.
         if self.app.state.client_file_transfer_dir != foreground_dir {
-            self.app.state.client_file_transfer_dir = foreground_dir;
+            self.app.state.client_file_transfer_dir = foreground_dir.to_owned();
         }
 
         if std::mem::take(&mut self.app.state.request_file_browser) {
@@ -6156,6 +6158,36 @@ mod tests {
         server.handle_client_file_transfer_end(1, id, true, None, Some("out.bin".to_owned()));
 
         assert_file_transfer_settled(&server, false);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn acking_a_download_chunk_refreshes_the_stall_deadline() {
+        // The receiver stays alive for the whole test: a closed writer channel
+        // drops the client, which aborts the transfer for its own reasons and
+        // would hide what this is measuring.
+        let (mut server, _control_rx) = window_title_test_server();
+        let dir = std::env::temp_dir().join(format!(
+            "herdr-ft-{}-download-stall-refresh",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("transfer dir");
+        let src = dir.join("out.bin");
+        fs::write(&src, vec![7u8; 8]).expect("source");
+
+        let id = server.begin_download_for_test(1, &src);
+        server.pump_download_for_test();
+
+        // A download's only inbound traffic is acks, so they have to refresh the
+        // deadline. Without that a healthy transfer running longer than
+        // FILE_TRANSFER_STALL_TIMEOUT is abandoned mid-flight — the 256 MiB cap
+        // is ~105s at 100ms RTT, well past the 60s deadline.
+        server.expire_file_transfer_for_test();
+        server.handle_client_file_transfer_ack(1, id, 0);
+
+        assert!(!server.drain_file_transfer_requests());
+        assert!(server.file_transfer.is_some());
         let _ = fs::remove_dir_all(&dir);
     }
 

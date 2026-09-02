@@ -14,7 +14,7 @@ use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize}
 use serde::Deserialize;
 use serde_json::{json, Value};
 use support::{
-    cleanup_test_base, register_runtime_dir, register_spawned_herdr_pid,
+    cleanup_test_base, encode_string, register_runtime_dir, register_spawned_herdr_pid,
     unregister_spawned_herdr_pid, CURRENT_PROTOCOL,
 };
 
@@ -412,13 +412,6 @@ fn decode_varint_u32(payload: &[u8], offset: usize) -> Result<(u32, usize), Stri
         }
         _ => Err(format!("unsupported varint tag: {first}")),
     }
-}
-
-/// bincode encodes a String as a varint length followed by its bytes.
-fn encode_string(value: &str) -> Vec<u8> {
-    let mut out = encode_varint_u32(value.len() as u32);
-    out.extend_from_slice(value.as_bytes());
-    out
 }
 
 fn client_handshake(stream: &mut UnixStream, version: u32, cols: u16, rows: u16) {
