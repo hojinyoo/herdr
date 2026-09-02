@@ -6,7 +6,8 @@ use ratatui::layout::Rect;
 use crate::{
     app::{
         state::{
-            AppState, ContextMenuKind, ContextMenuState, MenuListState, Mode, NavigatorStateFilter,
+            AppState, ContextMenuItem, ContextMenuKind, ContextMenuState, MenuListState, Mode,
+            NavigatorStateFilter,
         },
         App,
     },
@@ -770,7 +771,7 @@ pub(super) fn apply_context_menu_action(
     menu: ContextMenuState,
     idx: usize,
 ) {
-    let item = menu.items().get(idx).copied();
+    let item = menu.items().get(idx).and_then(ContextMenuItem::native);
     match (menu.kind, item) {
         (ContextMenuKind::GitWorkspace { ws_idx, .. }, Some("New worktree")) => {
             state.request_new_linked_worktree = Some(ws_idx);
@@ -985,7 +986,8 @@ pub(crate) fn handle_context_menu_key(
         }
         KeyCode::Down => {
             if let Some(menu) = &mut state.context_menu {
-                menu.list.move_next(menu.items().len());
+                let len = menu.items().len();
+                menu.list.move_next(len);
             }
         }
         KeyCode::Enter => {
@@ -1184,7 +1186,8 @@ impl App {
             }
             KeyCode::Down => {
                 if let Some(menu) = &mut self.state.context_menu {
-                    menu.list.move_next(menu.items().len());
+                    let len = menu.items().len();
+                    menu.list.move_next(len);
                 }
             }
             KeyCode::Enter => {
@@ -1197,8 +1200,39 @@ impl App {
         }
     }
 
+    fn invoke_context_menu_plugin_action(&mut self, action_id: &str, kind: &ContextMenuKind) {
+        // No Tab arm: `plugin_action_context` gives tab menus no plugin rows, and
+        // guessing a scope here would silently reintroduce the active-vs-clicked
+        // bug the moment tab contexts are wired up.
+        let (ws_idx, pane_id) = match *kind {
+            ContextMenuKind::Workspace { ws_idx }
+            | ContextMenuKind::GitWorkspace { ws_idx, .. } => (ws_idx, None),
+            ContextMenuKind::Pane {
+                ws_idx, pane_id, ..
+            } => (ws_idx, Some(pane_id)),
+            ContextMenuKind::Tab { .. } => return,
+        };
+        let previous_toast = self.state.toast.clone();
+        if let Err(err) = self.invoke_plugin_action_from_context_menu(action_id, ws_idx, pane_id) {
+            self.state.toast = Some(crate::app::state::ToastNotification {
+                kind: crate::app::state::ToastKind::NeedsAttention,
+                title: "plugin action failed".to_string(),
+                context: err,
+                position: None,
+                target: None,
+            });
+            self.sync_toast_deadline(previous_toast);
+        }
+    }
+
     pub(crate) fn apply_context_menu_action_via_api(&mut self, menu: ContextMenuState, idx: usize) {
-        let item = menu.items().get(idx).copied();
+        let item = menu.items().get(idx).cloned();
+        if let Some(ContextMenuItem::Plugin { action_id, .. }) = item {
+            self.invoke_context_menu_plugin_action(&action_id, &menu.kind);
+            leave_modal(&mut self.state);
+            return;
+        }
+        let item = item.as_ref().and_then(ContextMenuItem::native);
         match (menu.kind, item) {
             (ContextMenuKind::GitWorkspace { ws_idx, .. }, Some("New worktree")) => {
                 self.state.request_new_linked_worktree = Some(ws_idx);
@@ -2203,17 +2237,17 @@ mod tests {
             checkout_path: "/repo/herdr-issue".into(),
             is_linked_worktree: true,
         });
-        let menu = ContextMenuState {
-            kind: ContextMenuKind::GitWorkspace {
+        let menu = ContextMenuState::new(
+            ContextMenuKind::GitWorkspace {
                 ws_idx: 0,
                 is_linked_worktree: false,
                 has_worktree_children: true,
                 collapsed: false,
             },
-            x: 0,
-            y: 0,
-            list: MenuListState::new(0),
-        };
+            0,
+            0,
+            &state.installed_plugins,
+        );
         let mut terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
 
         apply_context_menu_action(&mut state, &mut terminal_runtimes, menu, 1);
@@ -2232,8 +2266,8 @@ mod tests {
         let mut app = app_with_test_workspaces(&["main"]);
         app.state.active = Some(0);
         let pane_id = app.state.workspaces[0].tabs[0].root_pane;
-        let menu = ContextMenuState {
-            kind: ContextMenuKind::Pane {
+        let menu = ContextMenuState::new(
+            ContextMenuKind::Pane {
                 ws_idx: 0,
                 tab_idx: 0,
                 pane_id,
@@ -2241,14 +2275,14 @@ mod tests {
                 has_manual_label: false,
                 right_click_passthrough: false,
             },
-            x: 0,
-            y: 0,
-            list: MenuListState::new(0),
-        };
+            0,
+            0,
+            &app.state.installed_plugins,
+        );
         let idx = menu
             .items()
             .iter()
-            .position(|item| *item == "Send right-clicks to pane")
+            .position(|item| item.label() == "Send right-clicks to pane")
             .unwrap();
         app.apply_context_menu_action_via_api(menu, idx);
 
@@ -2280,8 +2314,8 @@ mod tests {
             is_linked_worktree: true,
         });
         let pane_id = state.workspaces[0].tabs[0].root_pane;
-        let menu = ContextMenuState {
-            kind: ContextMenuKind::Pane {
+        let menu = ContextMenuState::new(
+            ContextMenuKind::Pane {
                 ws_idx: 0,
                 tab_idx: 0,
                 pane_id,
@@ -2289,14 +2323,14 @@ mod tests {
                 has_manual_label: false,
                 right_click_passthrough: false,
             },
-            x: 0,
-            y: 0,
-            list: MenuListState::new(0),
-        };
+            0,
+            0,
+            &state.installed_plugins,
+        );
         let idx = menu
             .items()
             .iter()
-            .position(|item| *item == "Close pane")
+            .position(|item| item.label() == "Close pane")
             .expect("close pane item");
         let mut terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
 
@@ -2359,19 +2393,19 @@ mod tests {
         app.state.active = Some(0);
         app.state.selected = 1;
         app.state.mode = Mode::ContextMenu;
-        let menu = ContextMenuState {
-            kind: ContextMenuKind::Tab {
+        let menu = ContextMenuState::new(
+            ContextMenuKind::Tab {
                 ws_idx: 0,
                 tab_idx: 0,
             },
-            x: 0,
-            y: 0,
-            list: MenuListState::new(0),
-        };
+            0,
+            0,
+            &app.state.installed_plugins,
+        );
         let idx = menu
             .items()
             .iter()
-            .position(|item| *item == "Close")
+            .position(|item| item.label() == "Close")
             .expect("close tab item");
 
         app.apply_context_menu_action_via_api(menu, idx);
@@ -2390,8 +2424,8 @@ mod tests {
         app.state.selected = 1;
         app.state.mode = Mode::ContextMenu;
         let pane_id = app.state.workspaces[0].tabs[0].root_pane;
-        let mut menu = ContextMenuState {
-            kind: ContextMenuKind::Pane {
+        let mut menu = ContextMenuState::new(
+            ContextMenuKind::Pane {
                 ws_idx: 0,
                 tab_idx: 0,
                 pane_id,
@@ -2399,14 +2433,14 @@ mod tests {
                 has_manual_label: false,
                 right_click_passthrough: false,
             },
-            x: 0,
-            y: 0,
-            list: MenuListState::new(0),
-        };
+            0,
+            0,
+            &app.state.installed_plugins,
+        );
         let close_idx = menu
             .items()
             .iter()
-            .position(|item| *item == "Close pane")
+            .position(|item| item.label() == "Close pane")
             .expect("close pane item");
         menu.list.highlighted = close_idx;
         app.state.context_menu = Some(menu);

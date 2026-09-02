@@ -5,9 +5,8 @@ use tracing::warn;
 
 use crate::{
     app::state::{
-        AgentPanelSort, AppState, ContextMenuKind, ContextMenuState, DragState, DragTarget,
-        MenuListState, Mode, RightClickPassthroughGesture, TabPressState, ViewLayout,
-        WorkspacePressState,
+        AgentPanelSort, AppState, ContextMenuKind, ContextMenuState, DragState, DragTarget, Mode,
+        RightClickPassthroughGesture, TabPressState, ViewLayout, WorkspacePressState,
     },
     layout::{PaneInfo, SplitBorder},
     selection::Selection,
@@ -1077,12 +1076,12 @@ impl AppState {
                             })
                         })
                         .unwrap_or(ContextMenuKind::Workspace { ws_idx: idx });
-                    self.context_menu = Some(ContextMenuState {
+                    self.context_menu = Some(ContextMenuState::new(
                         kind,
-                        x: mouse.column,
-                        y: mouse.row,
-                        list: MenuListState::new(0),
-                    });
+                        mouse.column,
+                        mouse.row,
+                        &self.installed_plugins,
+                    ));
                     self.mode = Mode::ContextMenu;
                 }
             }
@@ -1094,12 +1093,12 @@ impl AppState {
                 if let (Some(ws_idx), Some(tab_idx)) =
                     (self.active, self.tab_at(mouse.column, mouse.row))
                 {
-                    self.context_menu = Some(ContextMenuState {
-                        kind: ContextMenuKind::Tab { ws_idx, tab_idx },
-                        x: mouse.column,
-                        y: mouse.row,
-                        list: MenuListState::new(0),
-                    });
+                    self.context_menu = Some(ContextMenuState::new(
+                        ContextMenuKind::Tab { ws_idx, tab_idx },
+                        mouse.column,
+                        mouse.row,
+                        &self.installed_plugins,
+                    ));
                     self.mode = Mode::ContextMenu;
                 }
             }
@@ -1127,8 +1126,8 @@ impl AppState {
                         .is_some();
                     let right_click_passthrough =
                         pane_state.is_some_and(|pane| pane.right_click_passthrough);
-                    self.context_menu = Some(ContextMenuState {
-                        kind: ContextMenuKind::Pane {
+                    self.context_menu = Some(ContextMenuState::new(
+                        ContextMenuKind::Pane {
                             ws_idx,
                             tab_idx,
                             pane_id: info.id,
@@ -1136,10 +1135,10 @@ impl AppState {
                             has_manual_label,
                             right_click_passthrough,
                         },
-                        x: mouse.column,
-                        y: mouse.row,
-                        list: MenuListState::new(0),
-                    });
+                        mouse.column,
+                        mouse.row,
+                        &self.installed_plugins,
+                    ));
                     self.mode = Mode::ContextMenu;
                 }
             }
@@ -1248,14 +1247,21 @@ impl AppState {
     pub(crate) fn context_menu_rect(&self) -> Option<Rect> {
         let menu = self.context_menu.as_ref()?;
         let screen = self.screen_rect();
-        let max_item_w = menu
-            .items()
+        let items = menu.items();
+        // Plugin titles are unbounded, so this width is attacker-controlled.
+        let max_item_w = items
             .iter()
-            .map(|item| item.len() as u16)
+            .map(|item| crate::ui::display_width_u16(item.label()))
             .max()
             .unwrap_or(0);
-        let menu_w = (max_item_w + 4).max(14).min(screen.width.max(1));
-        let menu_h = (menu.items().len() as u16 + 2).min(screen.height.max(1));
+        let menu_w = max_item_w
+            .saturating_add(4)
+            .max(14)
+            .min(screen.width.max(1));
+        let menu_h = u16::try_from(items.len())
+            .unwrap_or(u16::MAX)
+            .saturating_add(2)
+            .min(screen.height.max(1));
         let x = menu.x.min(screen.x + screen.width.saturating_sub(menu_w));
         let y = menu.y.min(screen.y + screen.height.saturating_sub(menu_h));
         Some(Rect::new(x, y, menu_w, menu_h))
@@ -1265,26 +1271,33 @@ impl AppState {
         crate::ui::confirm_close_popup_rect(self.view.terminal_area).unwrap_or_default()
     }
 
+    /// Keep the scrolled window in step with the highlighted row. Called from
+    /// `compute_view` rather than from each key arm, so the stored offset is
+    /// always the one the last drawn frame used - which is what the hit test
+    /// below has to resolve against. Doing it per-keypress missed `Up` and
+    /// missed resizes, and every future highlight mover would have to remember.
+    pub(crate) fn sync_context_menu_offset(&mut self) {
+        let Some(rect) = self.context_menu_rect() else {
+            return;
+        };
+        let visible_rows = rect.height.saturating_sub(2) as usize;
+        if let Some(menu) = &mut self.context_menu {
+            menu.sync_offset(visible_rows);
+        }
+    }
+
     fn context_menu_item_at(&self, col: u16, row: u16) -> Option<usize> {
         let menu_rect = self.context_menu_rect()?;
+        let menu = self.context_menu.as_ref()?;
         let inner_x = menu_rect.x + 1;
         let inner_y = menu_rect.y + 1;
         let inner_w = menu_rect.width.saturating_sub(2);
         let inner_h = menu_rect.height.saturating_sub(2);
-        let item_count = self
-            .context_menu
-            .as_ref()
-            .map(|menu| menu.items().len() as u16)
-            .unwrap_or(0);
-        if col >= inner_x
-            && col < inner_x + inner_w
-            && row >= inner_y
-            && row < inner_y + inner_h.min(item_count)
-        {
-            Some((row - inner_y) as usize)
-        } else {
-            None
+        if col < inner_x || col >= inner_x + inner_w || row < inner_y || row >= inner_y + inner_h {
+            return None;
         }
+        let idx = menu.offset() + (row - inner_y) as usize;
+        (idx < menu.items().len()).then_some(idx)
     }
 
     pub(super) fn tab_at(&self, col: u16, row: u16) -> Option<usize> {
@@ -3073,7 +3086,7 @@ mod tests {
         let swap_idx = menu
             .items()
             .iter()
-            .position(|item| *item == "Swap with focused pane")
+            .position(|item| item.label() == "Swap with focused pane")
             .expect("swap item");
         menu.list.highlighted = swap_idx;
 
@@ -3151,7 +3164,137 @@ mod tests {
                 ..
             } if pane_id == target && source_pane_id == source
         ));
-        assert!(menu.items().contains(&"Swap with focused pane"));
+        assert!(menu
+            .items()
+            .iter()
+            .any(|item| item.label() == "Swap with focused pane"));
+    }
+
+    /// A menu taller than the screen scrolls. The row the user clicks must be
+    /// the row that was drawn there, or a plugin row invokes a native action
+    /// that has no confirmation step.
+    #[test]
+    fn scrolled_context_menu_click_resolves_to_the_drawn_row() {
+        let mut state = AppState::test_new();
+        let actions = (0..30)
+            .map(|i| crate::api::schema::PluginManifestAction {
+                id: format!("a{i:02}"),
+                title: format!("PluginAction{i:02}"),
+                description: None,
+                contexts: vec![crate::api::schema::PluginActionContext::Pane],
+                platforms: None,
+                command: vec!["true".into()],
+            })
+            .collect::<Vec<_>>();
+        state.installed_plugins.insert(
+            "zz.many".into(),
+            crate::api::schema::InstalledPluginInfo {
+                plugin_id: "zz.many".into(),
+                name: "many".into(),
+                version: "0.1.0".into(),
+                min_herdr_version: "0.7.0".into(),
+                description: None,
+                manifest_path: "/p/zz.many/herdr-plugin.toml".into(),
+                plugin_root: "/p/zz.many".into(),
+                enabled: true,
+                platforms: None,
+                build: Vec::new(),
+                startup: Vec::new(),
+                actions,
+                events: Vec::new(),
+                panes: Vec::new(),
+                link_handlers: Vec::new(),
+                source: crate::api::schema::PluginSourceInfo::default(),
+                warnings: Vec::new(),
+            },
+        );
+        state.context_menu = Some(ContextMenuState::new(
+            ContextMenuKind::Pane {
+                ws_idx: 0,
+                tab_idx: 0,
+                pane_id: crate::layout::PaneId::alloc(),
+                source_pane_id: None,
+                has_manual_label: false,
+                right_click_passthrough: false,
+            },
+            0,
+            0,
+            &state.installed_plugins,
+        ));
+        state.mode = Mode::ContextMenu;
+        let area = Rect::new(0, 0, 80, 24);
+        crate::ui::compute_view(&mut state, area);
+
+        let count = state.context_menu.as_ref().expect("menu").items().len();
+        assert!(
+            count as u16 + 2 > area.height,
+            "test needs a menu taller than the screen, got {count} items"
+        );
+
+        scroll_context_menu_down(&mut state, area, count);
+        assert!(
+            state.context_menu.as_ref().expect("menu").offset() > 0,
+            "menu should have scrolled"
+        );
+        assert_context_menu_rows_are_clickable(&state, area);
+
+        // Back up: ratatui rescrolls to keep the highlight visible, so the
+        // stored offset has to follow it in this direction too.
+        for _ in 0..count {
+            if let Some(menu) = &mut state.context_menu {
+                menu.list.move_prev();
+            }
+            crate::ui::compute_view(&mut state, area);
+        }
+        assert_context_menu_rows_are_clickable(&state, area);
+
+        // Shrinking the screen under an already-scrolled menu moves the drawn
+        // window without touching the highlight.
+        scroll_context_menu_down(&mut state, area, count);
+        let smaller = Rect::new(0, 0, 80, 12);
+        crate::ui::compute_view(&mut state, smaller);
+        assert_context_menu_rows_are_clickable(&state, smaller);
+    }
+
+    fn scroll_context_menu_down(state: &mut AppState, area: Rect, count: usize) {
+        for _ in 0..count {
+            if let Some(menu) = &mut state.context_menu {
+                menu.list.move_next(count);
+            }
+            crate::ui::compute_view(state, area);
+        }
+    }
+
+    /// Every row the menu draws must hit-test back to the item drawn there.
+    fn assert_context_menu_rows_are_clickable(state: &AppState, area: Rect) {
+        let rect = state.context_menu_rect().expect("menu rect");
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(area.width, area.height))
+                .expect("terminal");
+        terminal
+            .draw(|frame| crate::ui::render(state, frame))
+            .expect("draw");
+        let buffer = terminal.backend().buffer().clone();
+
+        let labels = state
+            .context_menu
+            .as_ref()
+            .expect("menu")
+            .items()
+            .iter()
+            .map(|item| item.label().to_string())
+            .collect::<Vec<_>>();
+        for row in rect.y + 1..rect.y + rect.height - 1 {
+            let drawn = (rect.x + 1..rect.x + rect.width - 1)
+                .map(|col| buffer[(col, row)].symbol().to_string())
+                .collect::<String>()
+                .trim()
+                .to_string();
+            let idx = state
+                .context_menu_item_at(rect.x + 2, row)
+                .expect("every drawn row must be clickable");
+            assert_eq!(labels[idx], drawn, "row {row} resolves to the wrong item");
+        }
     }
 
     #[tokio::test]
@@ -3279,12 +3422,12 @@ mod tests {
     #[test]
     fn hovering_context_menu_updates_highlight() {
         let mut app = app_for_mouse_test();
-        app.state.context_menu = Some(ContextMenuState {
-            kind: ContextMenuKind::Workspace { ws_idx: 0 },
-            x: 2,
-            y: 2,
-            list: MenuListState::new(0),
-        });
+        app.state.context_menu = Some(ContextMenuState::new(
+            ContextMenuKind::Workspace { ws_idx: 0 },
+            2,
+            2,
+            &app.state.installed_plugins,
+        ));
         app.state.mode = Mode::ContextMenu;
 
         let menu = app.state.context_menu_rect().unwrap();
@@ -3573,12 +3716,14 @@ mod tests {
         app.state.selected = 0;
         app.state.mode = Mode::Terminal;
 
-        app.state.context_menu = Some(ContextMenuState {
-            kind: ContextMenuKind::Workspace { ws_idx: 1 },
-            x: 2,
-            y: 2,
-            list: MenuListState::new(1),
-        });
+        let mut menu = ContextMenuState::new(
+            ContextMenuKind::Workspace { ws_idx: 1 },
+            2,
+            2,
+            &app.state.installed_plugins,
+        );
+        menu.list = MenuListState::new(1);
+        app.state.context_menu = Some(menu);
         app.state.mode = Mode::ContextMenu;
         handle_context_menu_key(
             &mut app.state,
@@ -3613,12 +3758,14 @@ mod tests {
         app.state.active = Some(0);
         app.state.selected = 0;
         app.state.confirm_close = false;
-        app.state.context_menu = Some(ContextMenuState {
-            kind: ContextMenuKind::Workspace { ws_idx: 1 },
-            x: 2,
-            y: 2,
-            list: MenuListState::new(1),
-        });
+        let mut menu = ContextMenuState::new(
+            ContextMenuKind::Workspace { ws_idx: 1 },
+            2,
+            2,
+            &app.state.installed_plugins,
+        );
+        menu.list = MenuListState::new(1);
+        app.state.context_menu = Some(menu);
         app.state.mode = Mode::ContextMenu;
 
         let menu = app.state.context_menu_rect().unwrap();
@@ -3660,8 +3807,8 @@ mod tests {
         app.state.selected = 0;
         let pane_id = app.state.workspaces[0].tabs[0].root_pane;
         let runtime_count = app.terminal_runtimes.len();
-        app.state.context_menu = Some(ContextMenuState {
-            kind: ContextMenuKind::Pane {
+        let mut menu = ContextMenuState::new(
+            ContextMenuKind::Pane {
                 ws_idx: 0,
                 tab_idx: 0,
                 pane_id,
@@ -3669,10 +3816,12 @@ mod tests {
                 has_manual_label: false,
                 right_click_passthrough: false,
             },
-            x: 2,
-            y: 2,
-            list: MenuListState::new(1),
-        });
+            2,
+            2,
+            &app.state.installed_plugins,
+        );
+        menu.list = MenuListState::new(1);
+        app.state.context_menu = Some(menu);
         app.state.mode = Mode::ContextMenu;
 
         handle_context_menu_key(
@@ -4273,7 +4422,7 @@ mod tests {
         let close_idx = menu_state
             .items()
             .iter()
-            .position(|item| *item == "Close pane")
+            .position(|item| item.label() == "Close pane")
             .expect("close pane menu item");
         let menu = app
             .state
@@ -4326,7 +4475,7 @@ mod tests {
         let close_idx = menu_state
             .items()
             .iter()
-            .position(|item| *item == "Close pane")
+            .position(|item| item.label() == "Close pane")
             .expect("close pane menu item");
         let menu = app
             .state

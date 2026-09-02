@@ -531,21 +531,24 @@ pub(super) fn effective_platforms<'a>(
     }
 }
 
+pub(super) fn platform_supported(platforms: &Option<Vec<PluginPlatform>>) -> bool {
+    platforms
+        .as_ref()
+        .is_none_or(|platforms| platforms.contains(&current_platform()))
+}
+
 pub(super) fn ensure_platform_supported(
     platforms: &Option<Vec<PluginPlatform>>,
     subject: &str,
 ) -> Result<(), (&'static str, String)> {
-    if let Some(platforms) = platforms {
-        let host = current_platform();
-        if !platforms.contains(&host) {
-            return Err((
-                "platform_unsupported",
-                format!(
-                    "{subject} does not support the current platform ({})",
-                    platform_name(host)
-                ),
-            ));
-        }
+    if !platform_supported(platforms) {
+        return Err((
+            "platform_unsupported",
+            format!(
+                "{subject} does not support the current platform ({})",
+                platform_name(current_platform())
+            ),
+        ));
     }
     Ok(())
 }

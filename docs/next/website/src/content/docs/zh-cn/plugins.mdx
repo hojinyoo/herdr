@@ -104,6 +104,14 @@ ASCII 字母、数字、冒号、下划线和连字符,但不能用点。每种 
 `platforms`;条目级的 platforms 覆盖顶层列表。没有顶层 `platforms` 的本地
 插件在链接时会给出警告。
 
+动作的 `contexts` 决定它出现在哪些右键菜单里。`workspace` 把动作加入侧边栏的
+工作区菜单,`pane` 把它加入窗格菜单,两者都排在 Herdr 自身的条目之后。从菜单调用时,
+传入的是被点击的那一行而不是当前活动的工作区,并带上
+`invocation_source = "context_menu"`。点击某一行不会移动 Herdr 自身的焦点,
+所以请使用上下文里的 id 来操作,不要让 `herdr` 命令回退到当前聚焦的窗格。其他 context 值可以解析,但目前还不会
+生成菜单条目。没有 `contexts` 的动作仍然可以通过快捷键、链接处理器和
+`herdr plugin action invoke` 调用。
+
 `command` 的值是 argv 数组。Herdr 不会通过 shell 运行它们,所以除非你的
 命令自己启动 shell,否则没有 shell 展开。语言相关的行为放到你的脚本或
 二进制里。

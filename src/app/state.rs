@@ -1285,56 +1285,167 @@ pub struct ContextMenuState {
     pub x: u16,
     pub y: u16,
     pub list: MenuListState,
+    /// Rows are frozen when the menu opens. The plugin registry is re-read from
+    /// disk on every event hook, so recomputing per frame would let a row mean
+    /// something different from what the user clicked on.
+    items: Vec<ContextMenuItem>,
+    /// First visible row. Mirrors what ratatui's List would scroll to, so the
+    /// hit test and the drawn rows agree once the menu outgrows the screen.
+    offset: usize,
+}
+
+/// A context menu row: either a built-in Herdr action or a plugin action.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContextMenuItem {
+    Native(&'static str),
+    Plugin {
+        label: String,
+        /// Qualified (`plugin_id.action_id`) so duplicate action ids across
+        /// plugins resolve through the existing lookup rule.
+        action_id: String,
+    },
+}
+
+impl ContextMenuItem {
+    pub fn label(&self) -> &str {
+        match self {
+            Self::Native(label) => label,
+            Self::Plugin { label, .. } => label,
+        }
+    }
+
+    pub fn native(&self) -> Option<&'static str> {
+        match self {
+            Self::Native(label) => Some(label),
+            Self::Plugin { .. } => None,
+        }
+    }
+}
+
+impl ContextMenuKind {
+    fn plugin_action_context(&self) -> Option<crate::api::schema::PluginActionContext> {
+        match self {
+            Self::Workspace { .. } | Self::GitWorkspace { .. } => {
+                Some(crate::api::schema::PluginActionContext::Workspace)
+            }
+            Self::Pane { .. } => Some(crate::api::schema::PluginActionContext::Pane),
+            Self::Tab { .. } => None,
+        }
+    }
 }
 
 impl ContextMenuState {
-    pub fn items(&self) -> Vec<&'static str> {
-        match self.kind {
-            ContextMenuKind::Workspace { .. } => vec!["Rename", "Close"],
-            ContextMenuKind::GitWorkspace {
-                is_linked_worktree: false,
-                has_worktree_children: false,
-                ..
-            } => vec!["Rename", "Close", "New worktree", "Open worktree..."],
-            ContextMenuKind::GitWorkspace {
-                is_linked_worktree: true,
-                ..
-            } => vec!["Rename", "Close", "Delete worktree checkout..."],
-            ContextMenuKind::GitWorkspace {
-                is_linked_worktree: false,
-                has_worktree_children: true,
-                collapsed,
-                ..
-            } => vec![
-                "Rename",
-                "Close group",
-                "New worktree",
-                "Open worktree...",
-                if collapsed { "Expand" } else { "Collapse" },
-            ],
-            ContextMenuKind::Tab { .. } => vec!["New tab", "Rename", "Close"],
-            ContextMenuKind::Pane {
-                source_pane_id,
-                has_manual_label,
-                right_click_passthrough,
-                ..
-            } => {
-                let mut items = vec!["Rename pane"];
-                if has_manual_label {
-                    items.push("Clear pane name");
-                }
-                if source_pane_id.is_some() {
-                    items.push("Swap with focused pane");
-                }
-                items.extend(["Split right", "Split down", "Zoom"]);
-                items.push(if right_click_passthrough {
-                    "Use Herdr right-click menu"
-                } else {
-                    "Send right-clicks to pane"
-                });
-                items.push("Close pane");
-                items
+    pub fn new(kind: ContextMenuKind, x: u16, y: u16, plugins: &InstalledPluginRegistry) -> Self {
+        let items = build_context_menu_items(&kind, plugins);
+        Self {
+            kind,
+            x,
+            y,
+            list: MenuListState::new(0),
+            items,
+            offset: 0,
+        }
+    }
+
+    pub fn items(&self) -> &[ContextMenuItem] {
+        &self.items
+    }
+
+    pub fn offset(&self) -> usize {
+        self.offset
+    }
+
+    /// Scroll so the highlighted row stays visible, applying the same rule
+    /// ratatui's List does, so the offset we draw with is the one it keeps.
+    pub fn sync_offset(&mut self, visible_rows: usize) {
+        if visible_rows == 0 {
+            return;
+        }
+        if self.list.highlighted < self.offset {
+            self.offset = self.list.highlighted;
+        } else if self.list.highlighted >= self.offset + visible_rows {
+            self.offset = self.list.highlighted + 1 - visible_rows;
+        }
+        self.offset = self
+            .offset
+            .min(self.items.len().saturating_sub(visible_rows));
+    }
+}
+
+fn build_context_menu_items(
+    kind: &ContextMenuKind,
+    plugins: &InstalledPluginRegistry,
+) -> Vec<ContextMenuItem> {
+    let mut items = native_context_menu_items(kind)
+        .into_iter()
+        .map(ContextMenuItem::Native)
+        .collect::<Vec<_>>();
+    // Plugin rows are appended so the first row stays a native action: a
+    // context menu row is invoked without confirmation.
+    if let Some(context) = kind.plugin_action_context() {
+        items.extend(
+            crate::app::api::plugins::actions_for_context(plugins, context)
+                .into_iter()
+                .map(|action| {
+                    let action_id = action.qualified_id();
+                    // Third-party text: bidi overrides could reorder a title to
+                    // read like a native row, and the length is otherwise
+                    // unbounded, which sizes the menu.
+                    let label = crate::app::tab_bar_status::sanitize_status_text(&action.title)
+                        .unwrap_or_else(|| action_id.clone());
+                    ContextMenuItem::Plugin { label, action_id }
+                }),
+        );
+    }
+    items
+}
+
+fn native_context_menu_items(kind: &ContextMenuKind) -> Vec<&'static str> {
+    match *kind {
+        ContextMenuKind::Workspace { .. } => vec!["Rename", "Close"],
+        ContextMenuKind::GitWorkspace {
+            is_linked_worktree: false,
+            has_worktree_children: false,
+            ..
+        } => vec!["Rename", "Close", "New worktree", "Open worktree..."],
+        ContextMenuKind::GitWorkspace {
+            is_linked_worktree: true,
+            ..
+        } => vec!["Rename", "Close", "Delete worktree checkout..."],
+        ContextMenuKind::GitWorkspace {
+            is_linked_worktree: false,
+            has_worktree_children: true,
+            collapsed,
+            ..
+        } => vec![
+            "Rename",
+            "Close group",
+            "New worktree",
+            "Open worktree...",
+            if collapsed { "Expand" } else { "Collapse" },
+        ],
+        ContextMenuKind::Tab { .. } => vec!["New tab", "Rename", "Close"],
+        ContextMenuKind::Pane {
+            source_pane_id,
+            has_manual_label,
+            right_click_passthrough,
+            ..
+        } => {
+            let mut items = vec!["Rename pane"];
+            if has_manual_label {
+                items.push("Clear pane name");
             }
+            if source_pane_id.is_some() {
+                items.push("Swap with focused pane");
+            }
+            items.extend(["Split right", "Split down", "Zoom"]);
+            items.push(if right_click_passthrough {
+                "Use Herdr right-click menu"
+            } else {
+                "Send right-clicks to pane"
+            });
+            items.push("Close pane");
+            items
         }
     }
 }
@@ -2355,6 +2466,81 @@ mod tests {
     use super::*;
     use crossterm::event::KeyEvent;
 
+    fn menu_labels(items: &[ContextMenuItem]) -> Vec<&str> {
+        items.iter().map(ContextMenuItem::label).collect()
+    }
+
+    fn plugin_with_action(
+        plugin_id: &str,
+        enabled: bool,
+        action: crate::api::schema::PluginManifestAction,
+    ) -> crate::api::schema::InstalledPluginInfo {
+        crate::api::schema::InstalledPluginInfo {
+            plugin_id: plugin_id.into(),
+            name: plugin_id.into(),
+            version: "0.1.0".into(),
+            min_herdr_version: "0.7.0".into(),
+            description: None,
+            manifest_path: format!("/plugins/{plugin_id}/herdr-plugin.toml"),
+            plugin_root: format!("/plugins/{plugin_id}"),
+            enabled,
+            platforms: None,
+            build: Vec::new(),
+            startup: Vec::new(),
+            actions: vec![action],
+            events: Vec::new(),
+            panes: Vec::new(),
+            link_handlers: Vec::new(),
+            source: crate::api::schema::PluginSourceInfo::default(),
+            warnings: Vec::new(),
+        }
+    }
+
+    fn manifest_action(
+        id: &str,
+        title: &str,
+        contexts: Vec<crate::api::schema::PluginActionContext>,
+        platforms: Option<Vec<crate::api::schema::PluginPlatform>>,
+    ) -> crate::api::schema::PluginManifestAction {
+        crate::api::schema::PluginManifestAction {
+            id: id.into(),
+            title: title.into(),
+            description: None,
+            contexts,
+            platforms,
+            command: vec!["true".into()],
+        }
+    }
+
+    fn registry(plugins: Vec<crate::api::schema::InstalledPluginInfo>) -> InstalledPluginRegistry {
+        plugins
+            .into_iter()
+            .map(|plugin| (plugin.plugin_id.clone(), plugin))
+            .collect()
+    }
+
+    fn workspace_menu(plugins: &InstalledPluginRegistry) -> ContextMenuState {
+        ContextMenuState::new(
+            ContextMenuKind::GitWorkspace {
+                ws_idx: 0,
+                is_linked_worktree: true,
+                has_worktree_children: false,
+                collapsed: false,
+            },
+            0,
+            0,
+            plugins,
+        )
+    }
+
+    fn foreign_platform() -> crate::api::schema::PluginPlatform {
+        if cfg!(target_os = "linux") {
+            crate::api::schema::PluginPlatform::Windows
+        } else {
+            crate::api::schema::PluginPlatform::Linux
+        }
+    }
+
     #[test]
     fn pane_size_estimate_uses_headless_size_before_first_view() {
         let mut state = AppState::test_new();
@@ -2623,60 +2809,60 @@ mod tests {
 
     #[test]
     fn linked_worktree_context_menu_keeps_safe_close_and_explicit_remove() {
-        let menu = ContextMenuState {
-            kind: ContextMenuKind::GitWorkspace {
+        let menu = ContextMenuState::new(
+            ContextMenuKind::GitWorkspace {
                 ws_idx: 0,
                 is_linked_worktree: true,
                 has_worktree_children: false,
                 collapsed: false,
             },
-            x: 0,
-            y: 0,
-            list: MenuListState::new(0),
-        };
+            0,
+            0,
+            &InstalledPluginRegistry::new(),
+        );
 
         assert_eq!(
-            menu.items(),
+            menu_labels(menu.items()),
             &["Rename", "Close", "Delete worktree checkout..."]
         );
     }
 
     #[test]
     fn git_workspace_context_menu_keeps_remove_for_managed_worktrees_only() {
-        let menu = ContextMenuState {
-            kind: ContextMenuKind::GitWorkspace {
+        let menu = ContextMenuState::new(
+            ContextMenuKind::GitWorkspace {
                 ws_idx: 0,
                 is_linked_worktree: false,
                 has_worktree_children: false,
                 collapsed: false,
             },
-            x: 0,
-            y: 0,
-            list: MenuListState::new(0),
-        };
+            0,
+            0,
+            &InstalledPluginRegistry::new(),
+        );
 
         assert_eq!(
-            menu.items(),
+            menu_labels(menu.items()),
             &["Rename", "Close", "New worktree", "Open worktree..."]
         );
     }
 
     #[test]
     fn parent_worktree_context_menu_uses_repo_actions() {
-        let menu = ContextMenuState {
-            kind: ContextMenuKind::GitWorkspace {
+        let menu = ContextMenuState::new(
+            ContextMenuKind::GitWorkspace {
                 ws_idx: 0,
                 is_linked_worktree: false,
                 has_worktree_children: true,
                 collapsed: false,
             },
-            x: 0,
-            y: 0,
-            list: MenuListState::new(0),
-        };
+            0,
+            0,
+            &InstalledPluginRegistry::new(),
+        );
 
         assert_eq!(
-            menu.items(),
+            menu_labels(menu.items()),
             &[
                 "Rename",
                 "Close group",
@@ -2684,6 +2870,231 @@ mod tests {
                 "Open worktree...",
                 "Collapse"
             ]
+        );
+    }
+
+    #[test]
+    fn workspace_context_menu_lists_matching_plugin_action_after_native_items() {
+        let plugins = registry(vec![plugin_with_action(
+            "example.worktree",
+            true,
+            manifest_action(
+                "status",
+                "Worktree status",
+                vec![crate::api::schema::PluginActionContext::Workspace],
+                None,
+            ),
+        )]);
+
+        let menu = workspace_menu(&plugins);
+        let items = menu.items();
+
+        assert_eq!(
+            menu_labels(items),
+            &[
+                "Rename",
+                "Close",
+                "Delete worktree checkout...",
+                "Worktree status"
+            ]
+        );
+        assert_eq!(
+            items.last(),
+            Some(&ContextMenuItem::Plugin {
+                label: "Worktree status".into(),
+                action_id: "example.worktree.status".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn workspace_context_menu_skips_plugin_action_for_another_context() {
+        let plugins = registry(vec![plugin_with_action(
+            "example.worktree",
+            true,
+            manifest_action(
+                "status",
+                "Worktree status",
+                vec![crate::api::schema::PluginActionContext::Pane],
+                None,
+            ),
+        )]);
+
+        assert_eq!(
+            menu_labels(workspace_menu(&plugins).items()),
+            &["Rename", "Close", "Delete worktree checkout..."]
+        );
+    }
+
+    #[test]
+    fn workspace_context_menu_skips_actions_from_disabled_plugins() {
+        let plugins = registry(vec![plugin_with_action(
+            "example.worktree",
+            false,
+            manifest_action(
+                "status",
+                "Worktree status",
+                vec![crate::api::schema::PluginActionContext::Workspace],
+                None,
+            ),
+        )]);
+
+        assert_eq!(
+            menu_labels(workspace_menu(&plugins).items()),
+            &["Rename", "Close", "Delete worktree checkout..."]
+        );
+    }
+
+    #[test]
+    fn workspace_context_menu_skips_actions_excluded_by_platform() {
+        let plugins = registry(vec![plugin_with_action(
+            "example.worktree",
+            true,
+            manifest_action(
+                "status",
+                "Worktree status",
+                vec![crate::api::schema::PluginActionContext::Workspace],
+                Some(vec![foreign_platform()]),
+            ),
+        )]);
+
+        assert_eq!(
+            menu_labels(workspace_menu(&plugins).items()),
+            &["Rename", "Close", "Delete worktree checkout..."]
+        );
+    }
+
+    #[test]
+    fn workspace_context_menu_skips_actions_inheriting_a_foreign_plugin_platform() {
+        let mut plugin = plugin_with_action(
+            "example.worktree",
+            true,
+            manifest_action(
+                "status",
+                "Worktree status",
+                vec![crate::api::schema::PluginActionContext::Workspace],
+                None,
+            ),
+        );
+        // An action with no platforms of its own inherits the plugin's, so the
+        // menu filter has to resolve them the same way the invoke path does or
+        // the row is listed here and only fails after the click.
+        plugin.platforms = Some(vec![foreign_platform()]);
+
+        assert_eq!(
+            menu_labels(workspace_menu(&registry(vec![plugin])).items()),
+            &["Rename", "Close", "Delete worktree checkout..."]
+        );
+    }
+
+    #[test]
+    fn plugin_titles_are_sanitized_before_they_reach_a_menu_row() {
+        let plugins = registry(vec![plugin_with_action(
+            "example.spoof",
+            true,
+            manifest_action(
+                "x",
+                "Close\u{202e} pane\u{200b}",
+                vec![crate::api::schema::PluginActionContext::Workspace],
+                None,
+            ),
+        )]);
+
+        let menu = workspace_menu(&plugins);
+        let label = menu.items().last().expect("plugin row").label();
+
+        assert!(
+            !label.chars().any(|c| c.is_control()
+                || matches!(c, '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}')),
+            "bidi/zero-width characters must not reach a menu row: {label:?}"
+        );
+    }
+
+    #[test]
+    fn a_plugin_title_that_sanitizes_away_falls_back_to_the_action_id() {
+        let plugins = registry(vec![plugin_with_action(
+            "example.spoof",
+            true,
+            manifest_action(
+                "x",
+                "\u{202e}\u{200b}",
+                vec![crate::api::schema::PluginActionContext::Workspace],
+                None,
+            ),
+        )]);
+
+        let menu = workspace_menu(&plugins);
+
+        assert_eq!(
+            menu.items().last().expect("plugin row").label(),
+            "example.spoof.x"
+        );
+    }
+
+    #[test]
+    fn plugin_actions_never_take_the_default_context_menu_selection() {
+        let plugins = registry(vec![plugin_with_action(
+            "example.worktree",
+            true,
+            manifest_action(
+                "plan-rm",
+                "Remove worktree plan",
+                vec![crate::api::schema::PluginActionContext::Workspace],
+                None,
+            ),
+        )]);
+        let menu = workspace_menu(&plugins);
+
+        let items = menu.items();
+
+        assert_eq!(
+            items[menu.list.highlighted],
+            ContextMenuItem::Native("Rename")
+        );
+        assert!(
+            items[..=menu.list.highlighted]
+                .iter()
+                .all(|item| item.native().is_some()),
+            "a plugin row must never sit at or above the default selection"
+        );
+        assert!(items.iter().any(|item| item.native().is_none()));
+    }
+
+    #[test]
+    fn pane_context_menu_lists_pane_scoped_plugin_actions_last() {
+        let plugins = registry(vec![plugin_with_action(
+            "example.pane-tools",
+            true,
+            manifest_action(
+                "inspect",
+                "Inspect pane",
+                vec![crate::api::schema::PluginActionContext::Pane],
+                None,
+            ),
+        )]);
+        let menu = ContextMenuState::new(
+            ContextMenuKind::Pane {
+                ws_idx: 0,
+                tab_idx: 0,
+                pane_id: PaneId::alloc(),
+                source_pane_id: None,
+                has_manual_label: false,
+                right_click_passthrough: false,
+            },
+            0,
+            0,
+            &plugins,
+        );
+
+        let items = menu.items();
+
+        assert_eq!(items.first(), Some(&ContextMenuItem::Native("Rename pane")));
+        assert_eq!(
+            items.last(),
+            Some(&ContextMenuItem::Plugin {
+                label: "Inspect pane".into(),
+                action_id: "example.pane-tools.inspect".into(),
+            })
         );
     }
 }

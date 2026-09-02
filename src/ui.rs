@@ -63,6 +63,7 @@ pub(crate) use self::tab_surface::{
     compute_tab_surface, render_tab_surface, resize_tab_surface, TabSurfaceLayout,
 };
 use self::tabs::render_tab_bar;
+pub(crate) use self::text::display_width_u16;
 pub(crate) use self::{
     dialogs::{
         confirm_close_button_rects, confirm_close_popup_rect, new_linked_worktree_button_rects,
@@ -321,6 +322,7 @@ fn compute_view_internal(
         split_borders,
     };
     app.sync_copy_mode_search_geometry();
+    app.sync_context_menu_offset();
 }
 
 fn compute_mobile_view(
@@ -384,6 +386,7 @@ fn compute_mobile_view(
         split_borders,
     };
     app.sync_copy_mode_search_geometry();
+    app.sync_context_menu_offset();
 }
 
 /// Render the UI — reads AppState but does not mutate it.
