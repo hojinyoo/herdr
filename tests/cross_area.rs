@@ -14,7 +14,7 @@ use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize}
 use serde::Deserialize;
 use serde_json::{json, Value};
 use support::{
-    cleanup_test_base, register_runtime_dir, register_spawned_herdr_pid,
+    cleanup_test_base, encode_string, register_runtime_dir, register_spawned_herdr_pid,
     unregister_spawned_herdr_pid, CURRENT_PROTOCOL,
 };
 
@@ -429,6 +429,7 @@ fn client_handshake(stream: &mut UnixStream, version: u32, cols: u16, rows: u16)
     payload.extend_from_slice(&encode_varint_u32(0)); // RenderEncoding::SemanticFrame
     payload.extend_from_slice(&encode_varint_u32(0)); // ClientKeybindings::Server
     payload.extend_from_slice(&encode_varint_u32(0)); // ClientLaunchMode::App
+    payload.extend_from_slice(&encode_string("")); // file_transfer_dir
 
     stream
         .write_all(&frame_message(&payload))

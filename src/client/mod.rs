@@ -14,6 +14,7 @@
 
 #[cfg(unix)]
 mod direct_graphics;
+pub(crate) mod file_transfer;
 mod input;
 
 use std::collections::HashSet;
@@ -98,6 +99,8 @@ struct ClientState {
     repaint_pending: bool,
     /// Whether this client draws the cursor into frame cells instead of using the host cursor.
     draw_host_cursor: bool,
+    /// The one native file transfer in flight, if any.
+    file_transfer: Option<file_transfer::ClientTransfer>,
 }
 
 #[derive(Debug, Default)]
@@ -846,6 +849,9 @@ fn do_handshake(
         .map_err(ClientError::ConnectionFailed)?;
 
     // Send Hello.
+    // Resolved here because the setting is client-side; the server renders the
+    // receive browser and would otherwise have no way to name the destination.
+    let file_transfer_dir = file_transfer::download_dir().to_string_lossy().into_owned();
     let hello = ClientMessage::Hello {
         version: PROTOCOL_VERSION,
         cols,
@@ -860,6 +866,7 @@ fn do_handshake(
             cell_width_px,
             cell_height_px,
         ),
+        file_transfer_dir,
     };
     protocol::write_message(stream, &hello)
         .map_err(|e| ClientError::ConnectionFailed(io::Error::other(e.to_string())))?;
@@ -1420,6 +1427,7 @@ async fn run_client_loop(
         redraw_on_focus_gained: config.redraw_on_focus_gained,
         repaint_pending: false,
         draw_host_cursor,
+        file_transfer: None,
     };
     debug!(?negotiated_encoding, "client render encoding active");
     let host_mouse_capture_active = Arc::new(AtomicBool::new(state.mouse_capture_active));
@@ -1842,6 +1850,45 @@ async fn run_client_loop(
                 } => {
                     handle_notify(kind, &message, body.as_deref(), &state.sound_config);
                 }
+                ServerMessage::FileTransferRequest { transfer_id, path } => {
+                    let replies =
+                        file_transfer::begin_upload(&mut state.file_transfer, transfer_id, &path);
+                    write_all_to_server(&mut write_stream, &replies)?;
+                }
+                ServerMessage::FileTransferStart {
+                    transfer_id,
+                    name,
+                    size,
+                } => {
+                    let replies = file_transfer::begin_download(
+                        &mut state.file_transfer,
+                        transfer_id,
+                        &name,
+                        size,
+                    );
+                    write_all_to_server(&mut write_stream, &replies)?;
+                }
+                ServerMessage::FileTransferChunk {
+                    transfer_id,
+                    seq,
+                    data,
+                } => {
+                    let replies = file_transfer::handle_chunk(
+                        &mut state.file_transfer,
+                        transfer_id,
+                        seq,
+                        &data,
+                    );
+                    write_all_to_server(&mut write_stream, &replies)?;
+                }
+                ServerMessage::FileTransferAck { transfer_id, seq } => {
+                    let replies =
+                        file_transfer::handle_ack(&mut state.file_transfer, transfer_id, seq);
+                    write_all_to_server(&mut write_stream, &replies)?;
+                }
+                ServerMessage::FileTransferEnd { transfer_id, .. } => {
+                    file_transfer::handle_end(&mut state.file_transfer, transfer_id);
+                }
                 ServerMessage::Clipboard { data } => {
                     forward_clipboard(&data);
                     let _ = io::stdout().flush();
@@ -1985,6 +2032,16 @@ fn server_reader_thread(
 /// Writes a message to the server stream (blocking).
 fn write_to_server(stream: &mut LocalStream, msg: &ClientMessage) -> io::Result<()> {
     protocol::write_message(stream, msg).map_err(|e| io::Error::other(e.to_string()))
+}
+
+fn write_all_to_server(
+    stream: &mut LocalStream,
+    messages: &[ClientMessage],
+) -> Result<(), ClientError> {
+    for msg in messages {
+        write_to_server(stream, msg).map_err(ClientError::ConnectionLost)?;
+    }
+    Ok(())
 }
 
 fn write_remote_image_to_server(

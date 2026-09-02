@@ -13,7 +13,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use support::{
-    cleanup_test_base, register_runtime_dir, register_spawned_herdr_pid,
+    cleanup_test_base, encode_string, register_runtime_dir, register_spawned_herdr_pid,
     unregister_spawned_herdr_pid, CURRENT_PROTOCOL,
 };
 
@@ -181,6 +181,7 @@ fn client_handshake(
             &encode_varint_u32(0),  // RenderEncoding::SemanticFrame
             &encode_varint_u32(0),  // ClientKeybindings::Server
             &encode_varint_u32(0),  // ClientLaunchMode::App
+            &encode_string(""),     // file_transfer_dir
         ],
     );
     let framed = frame_message(&hello_payload);

@@ -51,9 +51,10 @@ mod terminal;
 pub(crate) use self::{
     lease::{ConsumedInputLease, ForwardedInputLease, InputLeaseKey, InputLeaseTable, RepeatPlan},
     modal::{
-        handle_global_menu_key, handle_keybind_help_key, handle_navigator_key,
-        insert_keybind_help_query_text, insert_navigator_search_text, insert_rename_input_text,
-        open_new_workspace_dialog,
+        handle_file_transfer_browse_key, handle_file_transfer_path_key,
+        handle_file_transfer_progress_key, handle_global_menu_key, handle_keybind_help_key,
+        handle_navigator_key, insert_keybind_help_query_text, insert_navigator_search_text,
+        insert_rename_input_text, open_new_workspace_dialog,
     },
     navigate::{
         terminal_direct_indexed_navigation_action, terminal_direct_non_indexed_navigation_action,
@@ -116,6 +117,13 @@ impl App {
                 Mode::KeybindHelp => handle_keybind_help_key(&mut self.state, key),
                 Mode::Navigator => {
                     handle_navigator_key(&mut self.state, &self.terminal_runtimes, key_event)
+                }
+                Mode::FileTransferPath => handle_file_transfer_path_key(&mut self.state, key_event),
+                Mode::FileTransferProgress => {
+                    handle_file_transfer_progress_key(&mut self.state, key_event)
+                }
+                Mode::FileTransferBrowse => {
+                    handle_file_transfer_browse_key(&mut self.state, key_event)
                 }
                 Mode::Terminal => unreachable!(),
             },
@@ -211,6 +219,15 @@ impl App {
         match self.state.mode {
             Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane => {
                 insert_rename_input_text(&mut self.state, text);
+                true
+            }
+            Mode::FileTransferPath => {
+                // A drag-and-drop reaches this field as a bracketed paste of a
+                // shell-shaped path — quoted, or with spaces backslash-escaped.
+                // Undo that so dropping a file with a space in its name works the
+                // same as typing the path by hand.
+                let normalized = crate::file_transfer::normalize_dropped_path(text);
+                insert_rename_input_text(&mut self.state, &normalized);
                 true
             }
             Mode::NewLinkedWorktree => {
@@ -441,6 +458,12 @@ impl App {
                     }
                     MouseAction::RenameModal(action) => {
                         self.apply_rename_mouse_action_via_api(action)
+                    }
+                    MouseAction::FileTransferModal(action) => {
+                        modal::apply_file_transfer_mouse_action(&mut self.state, action)
+                    }
+                    MouseAction::FileBrowserActivate => {
+                        modal::activate_file_browser_selection(&mut self.state)
                     }
                     MouseAction::ConfirmCloseAccept => self.confirm_close_accept_via_api(),
                     MouseAction::ContextMenu { menu, idx } => {
@@ -733,9 +756,11 @@ pub(crate) fn is_modal_paste_shortcut(key: &KeyEvent) -> bool {
 
 pub(crate) fn modal_paste_target_active(state: &AppState) -> bool {
     match state.mode {
-        Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane | Mode::NewLinkedWorktree => {
-            true
-        }
+        Mode::RenameWorkspace
+        | Mode::RenameTab
+        | Mode::RenamePane
+        | Mode::NewLinkedWorktree
+        | Mode::FileTransferPath => true,
         Mode::OpenExistingWorktree => state
             .worktree_open
             .as_ref()
@@ -846,6 +871,11 @@ fn app_for_mouse_test() -> App {
     app.state.view.sidebar_rect = ratatui::layout::Rect::new(0, 0, 26, 20);
     app.state.view.terminal_area = ratatui::layout::Rect::new(26, 0, 80, 20);
     app
+}
+
+#[cfg(test)]
+pub(super) fn open_file_transfer_browser_for_test(state: &mut AppState, dir: std::path::PathBuf) {
+    modal::open_file_transfer_browser(state, dir, "/home/me/Downloads".to_owned());
 }
 
 #[cfg(test)]
@@ -1047,5 +1077,11 @@ mod tests {
 
         state.mode = Mode::ConfirmClose;
         assert!(!modal_paste_target_active(&state));
+
+        // The transfer prompt takes a file path, which is the value people
+        // paste most; without this the shortcut falls through to the mode's own
+        // key handler and Cmd+V types a literal "v" into the field.
+        state.mode = Mode::FileTransferPath;
+        assert!(modal_paste_target_active(&state));
     }
 }

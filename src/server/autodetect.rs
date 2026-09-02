@@ -126,6 +126,8 @@ fn client_protocol_accepts_hello(socket_path: &Path) -> io::Result<bool> {
         requested_encoding: crate::protocol::RenderEncoding::SemanticFrame,
         keybindings: crate::protocol::ClientKeybindings::Server,
         launch_mode: crate::protocol::ClientLaunchMode::App,
+        // A liveness probe, not a real client: it never receives a file.
+        file_transfer_dir: String::new(),
     };
 
     match crate::protocol::write_message(&mut stream, &hello) {

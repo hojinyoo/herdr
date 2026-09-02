@@ -906,6 +906,12 @@ pub enum Mode {
     GlobalMenu,
     KeybindHelp,
     Navigator,
+    /// Typing the path for a file transfer, in `name_input`.
+    FileTransferPath,
+    /// Watching a transfer run, or reading why it failed.
+    FileTransferProgress,
+    /// Browsing the server's filesystem to pick a file to receive.
+    FileTransferBrowse,
 }
 
 impl Mode {
@@ -936,6 +942,8 @@ impl Mode {
                 | Mode::ContextMenu
                 | Mode::GlobalMenu
                 | Mode::KeybindHelp
+                | Mode::FileTransferProgress
+                | Mode::FileTransferBrowse
         )
     }
 }
@@ -1327,6 +1335,7 @@ impl ContextMenuState {
                     items.push("Swap with focused pane");
                 }
                 items.extend(["Split right", "Split down", "Zoom"]);
+                items.extend(["Send file...", "Receive file..."]);
                 items.push(if right_click_passthrough {
                     "Use Herdr right-click menu"
                 } else {
@@ -1336,6 +1345,190 @@ impl ContextMenuState {
                 items
             }
         }
+    }
+}
+
+/// One row in the receive browser.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileBrowserEntry {
+    pub name: String,
+    pub is_dir: bool,
+    /// `None` for directories and for anything whose metadata could not be read.
+    pub size: Option<u64>,
+    /// The `..` row, which sorts first and is never filtered out.
+    pub is_parent: bool,
+}
+
+impl FileBrowserEntry {
+    fn matches(&self, query: &str) -> bool {
+        self.is_parent || self.name.to_lowercase().contains(&query.to_lowercase())
+    }
+}
+
+/// Receive-side file browser. The source lives on the machine running the
+/// server, so listing it needs no protocol support.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileBrowserState {
+    pub dir: std::path::PathBuf,
+    pub entries: Vec<FileBrowserEntry>,
+    pub selected: usize,
+    pub query: String,
+    pub show_hidden: bool,
+    /// Set when the directory could not be read; the list is empty but the
+    /// browser stays open so the user can go back up.
+    pub error: Option<String>,
+    /// True when the listing was capped, so the footer can say so rather than
+    /// silently showing a partial directory.
+    pub truncated: bool,
+    /// Where the selected file will land, as the client resolved it. Empty when
+    /// no client reported one, in which case the UI names the setting instead.
+    pub destination: String,
+    /// First filtered row drawn. Remembered rather than derived from the
+    /// selection: a window that re-centres on every selection scrolls the list
+    /// out from under the pointer, so clicking a row moves the row you just
+    /// clicked.
+    pub scroll: usize,
+}
+
+/// Directories with more entries than this are listed partially. Reading is
+/// per-navigation, not per-keystroke, but an enormous directory should not
+/// stall a render either.
+pub const FILE_BROWSER_MAX_ENTRIES: usize = 2000;
+
+impl FileBrowserState {
+    pub(crate) fn filtered_indices(&self) -> Vec<usize> {
+        let query = self.query.trim();
+        self.entries
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, entry)| (query.is_empty() || entry.matches(query)).then_some(idx))
+            .collect()
+    }
+
+    pub(crate) fn selected_entry(&self) -> Option<&FileBrowserEntry> {
+        let indices = self.filtered_indices();
+        if indices.contains(&self.selected) {
+            return self.entries.get(self.selected);
+        }
+        indices.first().and_then(|idx| self.entries.get(*idx))
+    }
+
+    pub(crate) fn select_next(&mut self) {
+        let indices = self.filtered_indices();
+        if indices.is_empty() {
+            return;
+        }
+        let pos = indices
+            .iter()
+            .position(|idx| *idx == self.selected)
+            .unwrap_or(0);
+        self.selected = indices[(pos + 1).min(indices.len() - 1)];
+    }
+
+    pub(crate) fn select_previous(&mut self) {
+        let indices = self.filtered_indices();
+        if indices.is_empty() {
+            return;
+        }
+        let pos = indices
+            .iter()
+            .position(|idx| *idx == self.selected)
+            .unwrap_or(0);
+        self.selected = indices[pos.saturating_sub(1)];
+    }
+
+    /// First filtered row shown in a list `visible` rows tall. Shared by the
+    /// renderer and mouse hit-testing so a click lands on the row it looks like.
+    pub(crate) fn window_start(&self, visible: usize) -> usize {
+        let indices = self.filtered_indices();
+        if visible == 0 || indices.len() <= visible {
+            return 0;
+        }
+        self.scroll.min(indices.len() - visible)
+    }
+
+    /// Scrolls the minimum needed to keep the selection on screen. Called after
+    /// anything that moves the selection, so a click never shifts the list.
+    pub(crate) fn ensure_selection_visible(&mut self, visible: usize) {
+        if visible == 0 {
+            return;
+        }
+        let indices = self.filtered_indices();
+        if indices.len() <= visible {
+            self.scroll = 0;
+            return;
+        }
+        let Some(position) = indices.iter().position(|idx| *idx == self.selected) else {
+            return;
+        };
+        if position < self.scroll {
+            self.scroll = position;
+        } else if position >= self.scroll + visible {
+            self.scroll = position + 1 - visible;
+        }
+        self.scroll = self.scroll.min(indices.len() - visible);
+    }
+
+    /// The entry drawn at `row` of the visible window, if any.
+    pub(crate) fn entry_at_row(&self, row: usize, visible: usize) -> Option<usize> {
+        let indices = self.filtered_indices();
+        indices.get(self.window_start(visible) + row).copied()
+    }
+
+    /// Keeps the cursor on a row that survives the current filter.
+    pub(crate) fn clamp_selection(&mut self) {
+        let indices = self.filtered_indices();
+        if !indices.contains(&self.selected) {
+            self.selected = indices.first().copied().unwrap_or(0);
+        }
+    }
+}
+
+/// Which way the bytes move, from the perspective of the machine running the
+/// herdr server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileTransferDirection {
+    /// Client-local file into the focused pane's working directory.
+    Upload,
+    /// Server-side file into the client's configured download directory.
+    Download,
+}
+
+impl FileTransferDirection {
+    pub(crate) fn title(self) -> &'static str {
+        match self {
+            Self::Upload => "send file",
+            Self::Download => "receive file",
+        }
+    }
+}
+
+/// Progress mirror for the one in-flight transfer, written by the server and
+/// only read by the renderer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileTransferState {
+    pub direction: FileTransferDirection,
+    /// File name, or the typed path until the peer announces the real name.
+    pub name: String,
+    pub size: u64,
+    pub done: u64,
+    /// Set once the transfer has stopped; `None` while it is still running.
+    pub outcome: Option<Result<(), String>>,
+}
+
+impl FileTransferState {
+    pub(crate) fn finished(&self) -> bool {
+        self.outcome.is_some()
+    }
+
+    /// Completion in 0..=1. A zero-byte file is complete the moment it starts,
+    /// and must not divide by zero — this renders in the shared server render
+    /// path, where a panic would take down every pane in the session.
+    pub(crate) fn ratio(&self) -> f64 {
+        if self.size == 0 {
+            return 1.0;
+        }
+        (self.done as f64 / self.size as f64).clamp(0.0, 1.0)
     }
 }
 
@@ -1463,6 +1656,22 @@ pub struct AppState {
     pub request_submit_worktree_open: bool,
     pub request_submit_worktree_remove: bool,
     pub request_reload_config: bool,
+    /// Set when the user confirmed a file transfer path. Drained by the server,
+    /// which owns the transfer itself.
+    pub request_file_transfer: Option<(FileTransferDirection, String)>,
+    /// Set when the user pressed Esc on a running transfer.
+    pub request_file_transfer_cancel: bool,
+    /// Progress mirror for the popup. Server-owned; the TUI only renders it.
+    pub file_transfer: Option<FileTransferState>,
+    /// Receive-side file browser, when open.
+    pub file_browser: Option<FileBrowserState>,
+    /// Set by the global menu, which has no pane in hand; drained by the app so
+    /// the browser can start at the focused pane's directory.
+    pub request_file_browser: bool,
+    /// Mirror of the foreground client's resolved download directory. Server
+    /// owned: the setting is client-side, so the TUI can only display what the
+    /// client reported at handshake.
+    pub client_file_transfer_dir: String,
     /// Set when the headless server should ask attached clients to reload
     /// their client-local sound config from disk.
     pub request_client_config_reload: bool,
@@ -1852,6 +2061,12 @@ impl AppState {
             request_submit_worktree_open: false,
             request_submit_worktree_remove: false,
             request_reload_config: false,
+            request_file_transfer: None,
+            request_file_transfer_cancel: false,
+            file_transfer: None,
+            file_browser: None,
+            request_file_browser: false,
+            client_file_transfer_dir: String::new(),
             request_client_config_reload: false,
             request_clipboard_write: None,
             creating_new_tab: false,

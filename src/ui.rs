@@ -23,7 +23,8 @@ mod text;
 mod widgets;
 
 use self::dialogs::{
-    render_confirm_close_overlay, render_new_linked_worktree_overlay,
+    render_confirm_close_overlay, render_file_transfer_browser, render_file_transfer_progress,
+    render_file_transfer_prompt, render_new_linked_worktree_overlay,
     render_open_existing_worktree_overlay, render_remove_worktree_overlay, render_rename_overlay,
 };
 use self::keybind_help::render_keybind_help_overlay;
@@ -65,11 +66,13 @@ pub(crate) use self::tab_surface::{
 use self::tabs::render_tab_bar;
 pub(crate) use self::{
     dialogs::{
-        confirm_close_button_rects, confirm_close_popup_rect, new_linked_worktree_button_rects,
+        confirm_close_button_rects, confirm_close_popup_rect, file_browser_list_rect,
+        file_transfer_button_rects, new_linked_worktree_button_rects,
         new_linked_worktree_inner_rect, open_existing_worktree_button_rects,
         open_existing_worktree_inner_rect, open_existing_worktree_max_visible_rows,
         open_existing_worktree_visible_start, remove_worktree_button_rects,
-        remove_worktree_popup_rect, rename_button_rects,
+        remove_worktree_popup_rect, rename_button_rects, FILE_TRANSFER_POPUP_HEIGHT,
+        FILE_TRANSFER_POPUP_WIDTH,
     },
     settings::{
         settings_button_rects, settings_popup_height, settings_show_primary_action,
@@ -457,6 +460,9 @@ pub fn render_with_runtime_registry(
         Mode::GlobalMenu => render_global_launcher_menu(app, frame),
         Mode::KeybindHelp => render_keybind_help_overlay(app, frame),
         Mode::Navigator => render_navigator_overlay(app, terminal_runtimes, frame),
+        Mode::FileTransferPath => render_file_transfer_prompt(app, frame, frame.area()),
+        Mode::FileTransferProgress => render_file_transfer_progress(app, frame, frame.area()),
+        Mode::FileTransferBrowse => render_file_transfer_browser(app, frame, frame.area()),
         Mode::Terminal => {}
     }
 }

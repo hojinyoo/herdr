@@ -26,7 +26,7 @@ pub(crate) struct ForwardedInputLease {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ConsumedInputLease {
-    ReprocessRepeats(TerminalInputContext),
+    ReprocessRepeats(Option<TerminalInputContext>),
     SuppressRepeats,
 }
 
@@ -39,7 +39,9 @@ pub(crate) enum InputLease {
 pub(crate) enum RepeatPlan {
     Forwarded(TerminalInputTarget),
     Reprocess {
-        context: TerminalInputContext,
+        /// `None` means the key was handled by a modal rather than a pane, so a
+        /// repeat is re-dispatched to the modal handler.
+        context: Option<TerminalInputContext>,
         repetitions: u16,
         tracked: bool,
     },
@@ -88,11 +90,13 @@ impl InputLeaseTable {
             return RepeatPlan::Ignore;
         }
         if !self.leases.contains_key(&lease_key) {
-            let disposition = match (initial_context, resulting_context) {
-                (Some(initial), Some(resulting)) if initial == resulting => {
-                    ConsumedInputLease::ReprocessRepeats(initial.clone())
-                }
-                _ => ConsumedInputLease::SuppressRepeats,
+            // Repeat is safe whenever the key left the input context where it
+            // found it — including `None`/`None`, which is every modal. Without
+            // the None case a held arrow key does nothing in any list overlay.
+            let disposition = if initial_context == resulting_context {
+                ConsumedInputLease::ReprocessRepeats(initial_context.cloned())
+            } else {
+                ConsumedInputLease::SuppressRepeats
             };
             self.insert_consumed(lease_key, disposition);
         }
@@ -121,7 +125,7 @@ impl InputLeaseTable {
                 return RepeatPlan::Forwarded(lease.target.clone());
             }
             Some(InputLease::Consumed(ConsumedInputLease::ReprocessRepeats(context)))
-                if current_context == Some(context) =>
+                if current_context == context.as_ref() =>
             {
                 return RepeatPlan::Reprocess {
                     context: context.clone(),
@@ -140,10 +144,14 @@ impl InputLeaseTable {
         }
         match current_context {
             Some(context) => RepeatPlan::Reprocess {
-                context: context.clone(),
+                context: Some(context.clone()),
                 repetitions: key.repeat_count,
                 tracked: false,
             },
+            // An untracked repeat has no press behind it. Inside a pane that is
+            // harmless, but in a modal it could be a stale key from before the
+            // modal opened, so it stays ignored — modal repeats are only honored
+            // when a tracked press established the lease in the same context.
             None => RepeatPlan::Ignore,
         }
     }
@@ -151,11 +159,11 @@ impl InputLeaseTable {
     pub(crate) fn reprocess_allowed(
         &mut self,
         lease_key: InputLeaseKey,
-        expected_context: &TerminalInputContext,
+        expected_context: Option<&TerminalInputContext>,
         current_context: Option<&TerminalInputContext>,
         tracked: bool,
     ) -> bool {
-        let allowed = current_context == Some(expected_context);
+        let allowed = current_context == expected_context;
         if tracked && !allowed {
             self.insert_consumed(lease_key, ConsumedInputLease::SuppressRepeats);
         }
@@ -393,7 +401,7 @@ mod tests {
         assert!(matches!(
             leases.complete_press(lease_key, &key, Some(&context), Some(&context), None),
             RepeatPlan::Reprocess {
-                context: TerminalInputContext::Pane,
+                context: Some(TerminalInputContext::Pane),
                 repetitions: 2,
                 tracked: true,
             }
@@ -436,7 +444,7 @@ mod tests {
         assert!(matches!(
             plan,
             RepeatPlan::Reprocess {
-                context: TerminalInputContext::Pane,
+                context: Some(TerminalInputContext::Pane),
                 repetitions: 2,
                 tracked: true,
             }
@@ -461,5 +469,53 @@ mod tests {
             InputLeaseKey::new(7, &physical),
             InputLeaseKey::new(7, &semantic)
         );
+    }
+    #[test]
+    fn a_modal_press_lets_its_own_repeats_through() {
+        // Held arrow keys in a list overlay must scroll. Modal keys report no
+        // terminal context, so before this the disposition fell through to
+        // SuppressRepeats and no herdr overlay repeated at all.
+        let mut leases = InputLeaseTable::default();
+        let key = physical_generated_slash(1).with_kind(crossterm::event::KeyEventKind::Press);
+        let lease_key = InputLeaseKey::new(0, &key);
+
+        let plan = leases.complete_press(lease_key, &key, None, None, None);
+        assert!(matches!(
+            plan,
+            RepeatPlan::Ignore // repeat_count is 1, so nothing to replay yet
+        ));
+
+        let repeat = key.with_kind(crossterm::event::KeyEventKind::Repeat);
+        match leases.plan_repeat(lease_key, &repeat, None) {
+            RepeatPlan::Reprocess {
+                context: None,
+                tracked: true,
+                ..
+            } => {}
+            _ => panic!("a modal repeat should reprocess in place"),
+        }
+    }
+
+    #[test]
+    fn a_press_that_changes_context_still_suppresses_its_repeats() {
+        // The reason repeats were scoped in the first place: a held Enter that
+        // dismisses a modal must not leak the repeats into the pane behind it.
+        let mut leases = InputLeaseTable::default();
+        let key = physical_generated_slash(1).with_kind(crossterm::event::KeyEventKind::Press);
+        let lease_key = InputLeaseKey::new(0, &key);
+
+        leases.complete_press(
+            lease_key,
+            &key,
+            None,
+            Some(&TerminalInputContext::Pane),
+            None,
+        );
+
+        let repeat = key.with_kind(crossterm::event::KeyEventKind::Repeat);
+        assert!(matches!(
+            leases.plan_repeat(lease_key, &repeat, Some(&TerminalInputContext::Pane)),
+            RepeatPlan::Ignore
+        ));
     }
 }

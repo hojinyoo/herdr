@@ -319,9 +319,11 @@ mod tests {
         assert_eq!(app.view.mobile_header_rect, Rect::new(0, 0, 44, 2));
         assert_eq!(app.view.terminal_area, Rect::new(0, 2, 44, 18));
         assert_eq!(frame.cursor, None);
+        // Re-baselined when the global menu gained send/receive file: the mobile
+        // switcher renders that menu, so its rows are part of this surface.
         assert_eq!(
             frame_digest(&frame),
-            "295608a66067f1e1f066c0adb3cf427e8a2d68bba8f68949fb72d464dcd8baab"
+            "149b37fe98f60f497115993bde70739b5c886f9c86767ac015c9ff69e7665c6b"
         );
     }
 }

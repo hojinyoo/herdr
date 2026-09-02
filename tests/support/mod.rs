@@ -15,7 +15,7 @@ static INIT: Once = Once::new();
 static CLEANUP_GUARD: OnceLock<CleanupGuard> = OnceLock::new();
 const WATCHDOG_SCAN_INTERVAL: Duration = Duration::from_secs(1);
 const RUNTIME_OWNER_MARKER: &str = ".herdr-test-owner-pid";
-pub const CURRENT_PROTOCOL: u32 = 21;
+pub const CURRENT_PROTOCOL: u32 = 22;
 
 pub fn register_spawned_herdr_pid(pid: Option<u32>) {
     let Some(pid) = pid else {
@@ -132,6 +132,13 @@ pub fn encode_varint_u16(v: u16) -> Vec<u8> {
     }
 }
 
+/// bincode encodes a String as a varint length followed by its bytes.
+pub fn encode_string(value: &str) -> Vec<u8> {
+    let mut out = encode_varint_u32(value.len() as u32);
+    out.extend_from_slice(value.as_bytes());
+    out
+}
+
 pub fn frame_message(payload: &[u8]) -> Vec<u8> {
     let len = payload.len() as u32;
     let mut framed = len.to_le_bytes().to_vec();
@@ -241,6 +248,7 @@ pub fn client_handshake(
             &encode_varint_u32(0),  // RenderEncoding::SemanticFrame
             &encode_varint_u32(0),  // ClientKeybindings::Server
             &encode_varint_u32(0),  // ClientLaunchMode::App
+            &encode_string(""),     // file_transfer_dir
         ],
     );
     let framed = frame_message(&hello_payload);

@@ -19,8 +19,8 @@ use tracing::{debug, warn};
 use crate::ipc::LocalStream;
 use crate::protocol::{
     self, AttachScrollDirection, AttachScrollSource, ClientInputEvent, ClientKeybindings,
-    ClientLaunchMode, ClientMessage, RenderEncoding, ServerMessage, MAX_CLIPBOARD_IMAGE_PAYLOAD,
-    MAX_FRAME_SIZE, MAX_GRAPHICS_FRAME_SIZE, PROTOCOL_VERSION,
+    ClientLaunchMode, ClientMessage, RenderEncoding, ServerMessage, FILE_TRANSFER_CHUNK_SIZE,
+    MAX_CLIPBOARD_IMAGE_PAYLOAD, MAX_FRAME_SIZE, MAX_GRAPHICS_FRAME_SIZE, PROTOCOL_VERSION,
 };
 
 /// Minimum accepted attached client size.
@@ -308,6 +308,8 @@ pub(crate) enum ServerEvent {
     /// A new client completed the handshake.
     ClientConnected {
         client_id: u64,
+        /// Where this client writes received files, resolved client-side.
+        file_transfer_dir: String,
         cols: u16,
         rows: u16,
         cell_width_px: u32,
@@ -354,6 +356,35 @@ pub(crate) enum ServerEvent {
         client_id: u64,
         extension: String,
         data: Vec<u8>,
+    },
+    /// A client announced the file it is about to upload.
+    ClientFileTransferStart {
+        client_id: u64,
+        transfer_id: u64,
+        name: String,
+        size: u64,
+    },
+    /// One upload payload chunk.
+    ClientFileTransferChunk {
+        client_id: u64,
+        transfer_id: u64,
+        seq: u32,
+        data: Vec<u8>,
+    },
+    /// A client finished, cancelled, or failed a transfer in either direction.
+    ClientFileTransferEnd {
+        client_id: u64,
+        transfer_id: u64,
+        ok: bool,
+        error: Option<String>,
+        /// Name the client wrote when it was the receiver, if it differs.
+        saved_name: Option<String>,
+    },
+    /// A client acknowledged one download chunk, releasing the next.
+    ClientFileTransferAck {
+        client_id: u64,
+        transfer_id: u64,
+        seq: u32,
     },
     /// A client requested direct attach to one terminal.
     ClientAttachTerminal {
@@ -563,6 +594,7 @@ pub(crate) fn handle_client_handshake(
         keybindings,
         direct_attach_requested,
         direct_graphics,
+        file_transfer_dir,
     ) = match hello {
         ClientMessage::Hello {
             version,
@@ -573,6 +605,7 @@ pub(crate) fn handle_client_handshake(
             requested_encoding,
             keybindings,
             launch_mode,
+            file_transfer_dir,
         } => {
             // Version check.
             match protocol::check_client_version(version) {
@@ -613,6 +646,7 @@ pub(crate) fn handle_client_handshake(
                 keybindings,
                 launch_mode == ClientLaunchMode::TerminalAttach,
                 launch_mode == ClientLaunchMode::AppDirectGraphics,
+                file_transfer_dir,
             )
         }
         _ => {
@@ -669,6 +703,7 @@ pub(crate) fn handle_client_handshake(
     // Notify the main loop about the new client.
     let connected = ServerEvent::ClientConnected {
         client_id,
+        file_transfer_dir,
         cols: client_cols,
         rows: client_rows,
         cell_width_px,
@@ -928,6 +963,61 @@ fn client_read_loop(
                         extension,
                         data,
                     }
+                }
+            }
+            ClientMessage::FileTransferStart {
+                transfer_id,
+                name,
+                size,
+            } => ServerEvent::ClientFileTransferStart {
+                client_id,
+                transfer_id,
+                name,
+                size,
+            },
+            ClientMessage::FileTransferChunk {
+                transfer_id,
+                seq,
+                data,
+            } => {
+                // Strict stop-and-wait means one chunk is ever in flight, so a
+                // larger one is a broken or hostile peer, not a fast one.
+                if data.len() > FILE_TRANSFER_CHUNK_SIZE {
+                    warn!(
+                        client_id,
+                        size = data.len(),
+                        max = FILE_TRANSFER_CHUNK_SIZE,
+                        "oversized file transfer chunk from client, closing"
+                    );
+                    let _ = server_event_tx
+                        .blocking_send(ServerEvent::ClientDisconnected { client_id });
+                    break;
+                } else {
+                    ServerEvent::ClientFileTransferChunk {
+                        client_id,
+                        transfer_id,
+                        seq,
+                        data,
+                    }
+                }
+            }
+            ClientMessage::FileTransferEnd {
+                transfer_id,
+                ok,
+                error,
+                saved_name,
+            } => ServerEvent::ClientFileTransferEnd {
+                client_id,
+                transfer_id,
+                ok,
+                error,
+                saved_name,
+            },
+            ClientMessage::FileTransferAck { transfer_id, seq } => {
+                ServerEvent::ClientFileTransferAck {
+                    client_id,
+                    transfer_id,
+                    seq,
                 }
             }
             ClientMessage::Resize {
@@ -1330,6 +1420,7 @@ new_tab = "ctrl+notakey"
                 requested_encoding: RenderEncoding::TerminalAnsi,
                 keybindings: ClientKeybindings::Server,
                 launch_mode: ClientLaunchMode::App,
+                file_transfer_dir: String::new(),
             },
         )
         .expect("write hello");
@@ -1355,6 +1446,7 @@ new_tab = "ctrl+notakey"
         {
             ServerEvent::ClientConnected {
                 client_id,
+                file_transfer_dir: _,
                 cols,
                 rows,
                 cell_width_px,
@@ -1407,6 +1499,7 @@ new_tab = "ctrl+notakey"
                 requested_encoding: RenderEncoding::TerminalAnsi,
                 keybindings: ClientKeybindings::Server,
                 launch_mode: ClientLaunchMode::TerminalAttach,
+                file_transfer_dir: String::new(),
             },
         )
         .expect("write hello");

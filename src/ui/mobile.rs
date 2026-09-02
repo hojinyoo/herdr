@@ -1424,7 +1424,23 @@ mod tests {
             agent_hit,
             Some(MobileSwitcherTarget::Agent { .. })
         ));
-        let workspace_hit = mobile_switcher_target_at(&app, viewport.x + 2, viewport.y + 7);
+        // Address the workspace ribbon through its doc row and the clamped
+        // scroll rather than a fixed viewport offset: any other switcher section
+        // changing height moves this row, and a hardcoded offset would silently
+        // start asserting against a different target instead of failing.
+        let scroll = app
+            .mobile_switcher_scroll
+            .min(mobile_switcher_max_scroll(&app));
+        let workspace_doc_row = mobile_switcher_workspace_doc_range(&app, 0).start;
+        assert!(
+            workspace_doc_row >= scroll,
+            "workspace ribbon scrolled out of view"
+        );
+        let workspace_hit = mobile_switcher_target_at(
+            &app,
+            viewport.x + 2,
+            viewport.y + (workspace_doc_row - scroll) as u16,
+        );
         assert_eq!(workspace_hit, Some(MobileSwitcherTarget::Workspace(0)));
     }
 

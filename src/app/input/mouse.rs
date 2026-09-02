@@ -57,6 +57,8 @@ pub(super) enum MouseAction {
     },
     RenameModal(ModalAction),
     ConfirmCloseAccept,
+    FileTransferModal(ModalAction),
+    FileBrowserActivate,
     ContextMenu {
         menu: ContextMenuState,
         idx: usize,
@@ -215,10 +217,37 @@ impl AppState {
 
         if matches!(
             self.mode,
-            Mode::NewLinkedWorktree | Mode::OpenExistingWorktree | Mode::ConfirmRemoveWorktree
+            Mode::NewLinkedWorktree
+                | Mode::OpenExistingWorktree
+                | Mode::ConfirmRemoveWorktree
+                | Mode::FileTransferPath
+                | Mode::FileTransferProgress
         ) && !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
         {
             return None;
+        }
+
+        if self.mode == Mode::FileTransferBrowse {
+            match mouse.kind {
+                MouseEventKind::ScrollUp => {
+                    if let Some(browser) = self.file_browser.as_mut() {
+                        browser.select_previous();
+                    }
+                    super::modal::keep_file_browser_selection_visible(self);
+                    return None;
+                }
+                MouseEventKind::ScrollDown => {
+                    if let Some(browser) = self.file_browser.as_mut() {
+                        browser.select_next();
+                    }
+                    super::modal::keep_file_browser_selection_visible(self);
+                    return None;
+                }
+                MouseEventKind::Down(MouseButton::Left) => {}
+                // Anything else must not fall through to the sidebar, which
+                // resets the mode and would close the browser.
+                _ => return None,
+            }
         }
 
         match mouse.kind {
@@ -387,6 +416,60 @@ impl AppState {
                         }
                     }
                     return None;
+                }
+
+                if self.mode == Mode::FileTransferBrowse {
+                    let hit = crate::ui::file_browser_list_rect(self.screen_rect())
+                        .filter(|list| rect_contains(*list, mouse.column, mouse.row))
+                        .and_then(|list| {
+                            let row = mouse.row.saturating_sub(list.y) as usize;
+                            self.file_browser
+                                .as_ref()?
+                                .entry_at_row(row, list.height as usize)
+                        });
+                    // Clicking the already-selected row opens it, so a single
+                    // click always means "select" and never surprises. A click
+                    // outside the list is swallowed rather than closing the
+                    // browser, which is what falling through used to do.
+                    return match hit {
+                        Some(idx)
+                            if self
+                                .file_browser
+                                .as_ref()
+                                .is_some_and(|b| b.selected == idx) =>
+                        {
+                            Some(MouseAction::FileBrowserActivate)
+                        }
+                        Some(idx) => {
+                            if let Some(browser) = self.file_browser.as_mut() {
+                                browser.selected = idx;
+                            }
+                            None
+                        }
+                        None => None,
+                    };
+                }
+
+                if matches!(
+                    self.mode,
+                    Mode::FileTransferPath | Mode::FileTransferProgress
+                ) {
+                    let buttons = self
+                        .file_transfer_modal_inner()
+                        .map(crate::ui::file_transfer_button_rects);
+                    let action = buttons.and_then(|(start, cancel)| {
+                        modal_action_from_buttons(
+                            mouse.column,
+                            mouse.row,
+                            &[(start, ModalAction::Save), (cancel, ModalAction::Cancel)],
+                        )
+                    });
+                    // Unlike the rename modal, a click outside the popup does not
+                    // cancel: a stray click must not abort a transfer that has
+                    // already moved bytes. Swallow it instead of letting it reach
+                    // the sidebar, which would reset the mode and strip the user
+                    // of the only way to cancel.
+                    return action.map(MouseAction::FileTransferModal);
                 }
 
                 if matches!(

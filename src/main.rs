@@ -64,6 +64,7 @@ mod client;
 mod config;
 mod detect;
 mod events;
+mod file_transfer;
 mod ghostty;
 mod handoff_runtime;
 mod input;

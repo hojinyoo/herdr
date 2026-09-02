@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 // ---------------------------------------------------------------------------
 
 /// Current protocol version. Bumped when wire format changes incompatibly.
-pub const PROTOCOL_VERSION: u32 = 21;
+pub const PROTOCOL_VERSION: u32 = 22;
 
 /// Maximum allowed frame payload size (2 MB). Frames larger than this are
 /// rejected to prevent denial-of-service via oversized length prefixes.
@@ -26,6 +26,30 @@ pub const MAX_GRAPHICS_FRAME_SIZE: usize = 32 * 1024 * 1024;
 
 /// Maximum clipboard image payload size for remote paste bridging.
 pub const MAX_CLIPBOARD_IMAGE_PAYLOAD: usize = 16 * 1024 * 1024;
+
+/// Maximum total size of one native file transfer, in either direction.
+///
+/// An honest peer costs `FILE_TRANSFER_CHUNK_SIZE` of resident memory
+/// regardless of file size, because one chunk is in flight at a time.
+///
+/// A hostile peer can do worse: chunk sequence numbers are predictable, so a
+/// client that acknowledges without reading its socket releases the next chunk
+/// into `ClientWriterQueue::control`, which is unbounded. Worst case is this
+/// constant's worth of server memory. That is a same-user self-DoS over a
+/// mode-restricted local socket, not a privilege boundary, so it is accepted
+/// rather than fixed — but it is the reason this number cannot grow freely.
+// ponytail: 256 KiB per round trip is also the throughput ceiling, so a full
+// 256 MiB transfer costs roughly 21s at 20ms RTT and 105s at 100ms. There is no
+// resume, so a drop restarts it. Raise the window before raising this again.
+pub const MAX_FILE_TRANSFER_SIZE: u64 = 256 * 1024 * 1024;
+
+/// Payload bytes carried by one `FileTransferChunk`.
+// ponytail: strict stop-and-wait, one chunk in flight, because
+// `ClientWriterQueue::control` is an unbounded VecDeque and an unacked sender
+// would buffer the whole file in RAM. On a 20 ms RTT link this ceilings
+// throughput near 12 MB/s; upgrade to a sliding window of N acks only if that
+// is measured to matter.
+pub const FILE_TRANSFER_CHUNK_SIZE: usize = 256 * 1024;
 
 /// Length of the u32 little-endian length prefix in bytes.
 const LENGTH_PREFIX_BYTES: usize = 4;
@@ -359,6 +383,10 @@ pub enum ClientMessage {
         keybindings: ClientKeybindings,
         /// Whether this connection will render the full app or attach directly to a pane terminal.
         launch_mode: ClientLaunchMode,
+        /// Where this client writes received files, already resolved on the
+        /// client. The server renders the receive UI but the setting is
+        /// client-side, so it cannot name the destination without being told.
+        file_transfer_dir: String,
     },
 
     /// Raw input bytes read from the client's stdin.
@@ -449,6 +477,39 @@ pub enum ClientMessage {
 
     /// The direct command was written and flushed; terminal response timing starts now.
     GraphicsTransmissionStarted { transfer_id: u64, image_id: u32 },
+
+    /// Begin an upload of one client-local file into the focused pane's cwd.
+    FileTransferStart {
+        transfer_id: u64,
+        /// File name only; the receiver rejects separators and `..`.
+        name: String,
+        /// Total byte length the sender will transmit.
+        size: u64,
+    },
+
+    /// One upload payload chunk. The sender waits for the matching
+    /// `ServerMessage::FileTransferAck` before sending `seq + 1`.
+    FileTransferChunk {
+        transfer_id: u64,
+        seq: u32,
+        data: Vec<u8>,
+    },
+
+    /// Terminal status for a transfer in either direction, and the cancel path.
+    FileTransferEnd {
+        transfer_id: u64,
+        ok: bool,
+        /// Human-readable failure reason when `ok` is false.
+        error: Option<String>,
+        /// Set only when this client was the receiver: the file name actually
+        /// written, which differs from the announced one when a collision was
+        /// suffixed. The sender's popup would otherwise name a file that is not
+        /// on disk.
+        saved_name: Option<String>,
+    },
+
+    /// Acknowledge one received download chunk, releasing the next one.
+    FileTransferAck { transfer_id: u64, seq: u32 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -753,6 +814,41 @@ pub enum ServerMessage {
 
     /// Suppress a direct command that expired before terminal delivery.
     GraphicsTransmissionRetired { transfer_id: u64, image_id: u32 },
+
+    /// Begin a download of one server-side file to the client.
+    FileTransferStart {
+        transfer_id: u64,
+        /// File name only; the client rejects separators and `..`.
+        name: String,
+        /// Total byte length the server will transmit.
+        size: u64,
+    },
+
+    /// One download payload chunk. The server waits for the matching
+    /// `ClientMessage::FileTransferAck` before sending `seq + 1`.
+    FileTransferChunk {
+        transfer_id: u64,
+        seq: u32,
+        data: Vec<u8>,
+    },
+
+    /// Terminal status for a transfer in either direction.
+    FileTransferEnd {
+        transfer_id: u64,
+        ok: bool,
+        /// Human-readable failure reason when `ok` is false.
+        error: Option<String>,
+    },
+
+    /// Acknowledge one received upload chunk, releasing the next one.
+    FileTransferAck { transfer_id: u64, seq: u32 },
+
+    /// Ask the client to send one client-side file (upload).
+    FileTransferRequest {
+        transfer_id: u64,
+        /// Path as typed by the user, resolved on the client.
+        path: String,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -1042,6 +1138,7 @@ mod tests {
             requested_encoding: RenderEncoding::SemanticFrame,
             keybindings: ClientKeybindings::Server,
             launch_mode: ClientLaunchMode::App,
+            file_transfer_dir: String::new(),
         };
         let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
         let (decoded, _): (ClientMessage, _) =
@@ -1079,6 +1176,7 @@ mod tests {
                 requested_encoding: RenderEncoding::SemanticFrame,
                 keybindings: ClientKeybindings::Server,
                 launch_mode: ClientLaunchMode::App,
+                file_transfer_dir: String::new(),
             }),
             0
         );
@@ -1132,6 +1230,268 @@ mod tests {
             }),
             9
         );
+        assert_eq!(
+            tag(&ClientMessage::GraphicsTransmissionResult {
+                transfer_id: 1,
+                image_id: 2,
+                success: true,
+            }),
+            10
+        );
+        assert_eq!(
+            tag(&ClientMessage::InputPixels {
+                data: Vec::new(),
+                cols: 0,
+                rows: 0,
+                width_px: 0,
+                height_px: 0,
+            }),
+            11
+        );
+        assert_eq!(
+            tag(&ClientMessage::GraphicsTransmissionStarted {
+                transfer_id: 1,
+                image_id: 2,
+            }),
+            12
+        );
+        assert_eq!(
+            tag(&ClientMessage::FileTransferStart {
+                transfer_id: 1,
+                name: "a.txt".to_owned(),
+                size: 1,
+            }),
+            13
+        );
+        assert_eq!(
+            tag(&ClientMessage::FileTransferChunk {
+                transfer_id: 1,
+                seq: 0,
+                data: Vec::new(),
+            }),
+            14
+        );
+        assert_eq!(
+            tag(&ClientMessage::FileTransferEnd {
+                transfer_id: 1,
+                ok: true,
+                error: None,
+                saved_name: None,
+            }),
+            15
+        );
+        assert_eq!(
+            tag(&ClientMessage::FileTransferAck {
+                transfer_id: 1,
+                seq: 0,
+            }),
+            16
+        );
+    }
+
+    #[test]
+    fn server_message_wire_tags_are_append_only() {
+        fn tag(msg: &ServerMessage) -> u8 {
+            *bincode::serde::encode_to_vec(msg, bincode::config::standard())
+                .unwrap()
+                .first()
+                .expect("encoded server message should include enum tag")
+        }
+
+        let empty_frame = FrameData {
+            cells: Vec::new(),
+            width: 0,
+            height: 0,
+            cursor: None,
+            hyperlinks: Vec::new(),
+            graphics: Vec::new(),
+        };
+        assert_eq!(
+            tag(&ServerMessage::Welcome {
+                version: PROTOCOL_VERSION,
+                encoding: RenderEncoding::SemanticFrame,
+                error: None,
+            }),
+            0
+        );
+        assert_eq!(tag(&ServerMessage::Frame(empty_frame)), 1);
+        assert_eq!(
+            tag(&ServerMessage::Terminal(TerminalFrame {
+                seq: 0,
+                width: 0,
+                height: 0,
+                full: false,
+                bytes: Vec::new(),
+            })),
+            2
+        );
+        assert_eq!(tag(&ServerMessage::Graphics { bytes: Vec::new() }), 3);
+        assert_eq!(tag(&ServerMessage::ServerShutdown { reason: None }), 4);
+        assert_eq!(
+            tag(&ServerMessage::Notify {
+                kind: NotifyKind::Toast,
+                message: String::new(),
+                body: None,
+            }),
+            5
+        );
+        assert_eq!(
+            tag(&ServerMessage::Clipboard {
+                data: String::new(),
+            }),
+            6
+        );
+        assert_eq!(tag(&ServerMessage::WindowTitle { title: None }), 7);
+        assert_eq!(tag(&ServerMessage::ReloadSoundConfig), 8);
+        assert_eq!(
+            tag(&ServerMessage::MouseCapture {
+                enabled: false,
+                sgr_pixels: false,
+            }),
+            9
+        );
+        assert_eq!(
+            tag(&ServerMessage::KittyKeyboardReportAll { enabled: false }),
+            10
+        );
+        assert_eq!(tag(&ServerMessage::PrefixInputSource { active: false }), 11);
+        assert_eq!(tag(&ServerMessage::TerminalBell { count: 0 }), 12);
+        assert_eq!(
+            tag(&ServerMessage::GraphicsFile {
+                path: String::new(),
+                expected_len: 0,
+                image_id: 0,
+                transfer_id: 0,
+                leading: Vec::new(),
+                control: String::new(),
+            }),
+            13
+        );
+        assert_eq!(
+            tag(&ServerMessage::GraphicsTransmissionRetired {
+                transfer_id: 0,
+                image_id: 0,
+            }),
+            14
+        );
+        assert_eq!(
+            tag(&ServerMessage::FileTransferStart {
+                transfer_id: 1,
+                name: "a.txt".to_owned(),
+                size: 1,
+            }),
+            15
+        );
+        assert_eq!(
+            tag(&ServerMessage::FileTransferChunk {
+                transfer_id: 1,
+                seq: 0,
+                data: Vec::new(),
+            }),
+            16
+        );
+        assert_eq!(
+            tag(&ServerMessage::FileTransferEnd {
+                transfer_id: 1,
+                ok: true,
+                error: None,
+            }),
+            17
+        );
+        assert_eq!(
+            tag(&ServerMessage::FileTransferAck {
+                transfer_id: 1,
+                seq: 0,
+            }),
+            18
+        );
+        assert_eq!(
+            tag(&ServerMessage::FileTransferRequest {
+                transfer_id: 1,
+                path: "a.txt".to_owned(),
+            }),
+            19
+        );
+    }
+
+    #[test]
+    fn file_transfer_messages_roundtrip() {
+        let client = [
+            ClientMessage::FileTransferStart {
+                transfer_id: 7,
+                name: "notes.txt".to_owned(),
+                size: 4,
+            },
+            ClientMessage::FileTransferChunk {
+                transfer_id: 7,
+                seq: 0,
+                data: vec![1, 2, 3, 4],
+            },
+            ClientMessage::FileTransferEnd {
+                transfer_id: 7,
+                ok: true,
+                error: None,
+                saved_name: Some("notes-1.txt".to_owned()),
+            },
+            ClientMessage::FileTransferAck {
+                transfer_id: 7,
+                seq: 0,
+            },
+        ];
+        for msg in client {
+            let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
+            let (decoded, _): (ClientMessage, _) =
+                bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
+            assert_eq!(msg, decoded);
+        }
+
+        let server = [
+            ServerMessage::FileTransferStart {
+                transfer_id: 8,
+                name: "out.txt".to_owned(),
+                size: 4,
+            },
+            ServerMessage::FileTransferChunk {
+                transfer_id: 8,
+                seq: 0,
+                data: vec![9, 9, 9, 9],
+            },
+            ServerMessage::FileTransferEnd {
+                transfer_id: 8,
+                ok: false,
+                error: Some("destination exists".to_owned()),
+            },
+            ServerMessage::FileTransferAck {
+                transfer_id: 8,
+                seq: 0,
+            },
+            ServerMessage::FileTransferRequest {
+                transfer_id: 9,
+                path: "/home/me/a.txt".to_owned(),
+            },
+        ];
+        for msg in server {
+            let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
+            let (decoded, _): (ServerMessage, _) =
+                bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
+            assert_eq!(msg, decoded);
+        }
+    }
+
+    #[test]
+    fn file_transfer_chunk_frame_fits_max_frame_size() {
+        let msg = ClientMessage::FileTransferChunk {
+            transfer_id: u64::MAX,
+            seq: u32::MAX,
+            data: vec![0xAB; FILE_TRANSFER_CHUNK_SIZE],
+        };
+        let mut buf = Vec::new();
+        write_message(&mut buf, &msg).unwrap();
+        assert!(
+            buf.len() - 4 <= MAX_FRAME_SIZE,
+            "chunk frame {} exceeds MAX_FRAME_SIZE",
+            buf.len() - 4
+        );
     }
 
     #[test]
@@ -1184,7 +1544,7 @@ mod tests {
             ],
         };
         let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
-        // Freeze the protocol 20 input envelope before it is published.
+        // Freeze the protocol 21 input envelope before it is published.
         assert_eq!(
             encoded,
             vec![
@@ -1660,6 +2020,7 @@ mod tests {
             requested_encoding: RenderEncoding::SemanticFrame,
             keybindings: ClientKeybindings::Server,
             launch_mode: ClientLaunchMode::App,
+            file_transfer_dir: String::new(),
         };
         let mut buf = Vec::new();
         write_message(&mut buf, &msg).unwrap();
@@ -1734,6 +2095,7 @@ mod tests {
                     requested_encoding: RenderEncoding::SemanticFrame,
                     keybindings: ClientKeybindings::Server,
                     launch_mode: ClientLaunchMode::App,
+                    file_transfer_dir: String::new(),
                 },
                 1 => ClientMessage::Input {
                     data: vec![(i % 256) as u8; (i as usize % 50) + 1],
@@ -2170,6 +2532,7 @@ mod tests {
             requested_encoding: RenderEncoding::SemanticFrame,
             keybindings: ClientKeybindings::Server,
             launch_mode: ClientLaunchMode::App,
+            file_transfer_dir: String::new(),
         };
         let mut buf = Vec::new();
         write_message(&mut buf, &msg).unwrap();
@@ -2206,6 +2569,7 @@ mod tests {
                 requested_encoding: RenderEncoding::SemanticFrame,
                 keybindings: ClientKeybindings::Server,
                 launch_mode: ClientLaunchMode::App,
+                file_transfer_dir: String::new(),
             },
             ClientMessage::Input {
                 data: b"hello world".to_vec(),

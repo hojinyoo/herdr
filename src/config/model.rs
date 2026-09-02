@@ -966,12 +966,16 @@ pub struct RemoteConfig {
     /// Add keepalive fallbacks and private connection reuse for `herdr --remote`.
     /// Set false to run plain ssh unchanged. Default: true.
     pub manage_ssh_config: bool,
+    /// Directory on the client machine where received files are written.
+    /// Default: "~/Downloads".
+    pub file_transfer_dir: String,
 }
 
 impl Default for RemoteConfig {
     fn default() -> Self {
         Self {
             manage_ssh_config: true,
+            file_transfer_dir: "~/Downloads".to_owned(),
         }
     }
 }

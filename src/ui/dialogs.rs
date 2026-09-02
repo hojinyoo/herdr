@@ -6,12 +6,17 @@ use ratatui::{
     Frame,
 };
 
-use super::text::{display_width_u16, truncate_end};
+use super::text::{
+    display_width, display_width_u16, middle_elide, take_suffix_width, truncate_end,
+};
 use super::widgets::{
     action_button_row_rects, centered_popup_rect, panel_contrast_fg, render_action_button,
     render_modal_header, render_modal_shell, render_panel_shell, ActionButtonSpec,
 };
-use crate::app::{state::WorktreeOpenState, AppState, Mode};
+use crate::app::{
+    state::{FileTransferDirection, WorktreeOpenState},
+    AppState, Mode,
+};
 use crate::terminal::TerminalRuntimeRegistry;
 
 const NEW_LINKED_WORKTREE_POPUP_WIDTH: u16 = 68;
@@ -55,8 +60,12 @@ fn render_name_input_field(app: &AppState, frame: &mut Frame, input_rect: Rect) 
         width: input_rect.width.saturating_sub(1),
         ..input_rect
     };
+    // Show the tail once the value outruns the field: the caret clamps to the
+    // right edge, so rendering from the start would park it past text the user
+    // cannot see.
+    let visible = take_suffix_width(&app.name_input, text_rect.width.saturating_sub(1) as usize);
     frame.render_widget(
-        Paragraph::new(format!(" {}", app.name_input)).style(
+        Paragraph::new(format!(" {visible}")).style(
             Style::default()
                 .fg(app.palette.text)
                 .bg(app.palette.surface0),
@@ -70,7 +79,7 @@ fn render_name_input_field(app: &AppState, frame: &mut Frame, input_rect: Rect) 
     let caret_x = input_rect
         .x
         .saturating_add(1)
-        .saturating_add(display_width_u16(&app.name_input))
+        .saturating_add(display_width_u16(&visible))
         .min(input_rect.right().saturating_sub(1));
     frame.set_cursor_position((caret_x, input_rect.y));
 }
@@ -139,6 +148,375 @@ pub(super) fn render_rename_overlay(app: &AppState, frame: &mut Frame, area: Rec
             .fg(app.palette.text)
             .bg(app.palette.surface0)
             .add_modifier(Modifier::BOLD),
+    );
+}
+
+pub(crate) const FILE_TRANSFER_POPUP_WIDTH: u16 = 60;
+pub(crate) const FILE_TRANSFER_POPUP_HEIGHT: u16 = 8;
+
+pub(crate) fn file_transfer_button_rects(inner: Rect) -> (Rect, Rect) {
+    let rects = action_button_row_rects(
+        inner,
+        &[
+            ActionButtonSpec {
+                hint: Some("↵"),
+                label: "start",
+            },
+            ActionButtonSpec {
+                hint: Some("esc"),
+                label: "cancel",
+            },
+        ],
+        2,
+        // One row below the sibling modals: a wrapped failure message needs two
+        // rows above the buttons, and the buttons are drawn last, so a shorter
+        // offset would overprint the second line of the error.
+        4,
+    );
+    (rects[0], rects[1])
+}
+
+pub(super) fn render_file_transfer_prompt(app: &AppState, frame: &mut Frame, area: Rect) {
+    super::dim_background(frame, area);
+
+    let Some(transfer) = app.file_transfer.as_ref() else {
+        return;
+    };
+    let Some(inner) = render_modal_shell(
+        frame,
+        area,
+        FILE_TRANSFER_POPUP_WIDTH,
+        FILE_TRANSFER_POPUP_HEIGHT,
+        &app.palette,
+    ) else {
+        return;
+    };
+    if inner.height < 5 {
+        return;
+    }
+
+    let rows = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(0),
+    ])
+    .areas::<5>(inner);
+
+    render_modal_header(frame, rows[0], transfer.direction.title(), &app.palette);
+
+    let hint = match transfer.direction {
+        FileTransferDirection::Upload => "path on this computer",
+        FileTransferDirection::Download => "path on the remote pane",
+    };
+    frame.render_widget(
+        Paragraph::new(truncate_end(hint, rows[1].width as usize))
+            .style(Style::default().fg(app.palette.overlay0)),
+        rows[1],
+    );
+
+    let input_rect = Rect::new(rows[2].x, rows[2].y, rows[2].width, 1);
+    render_name_input_field(app, frame, input_rect);
+
+    let (start_rect, cancel_rect) = file_transfer_button_rects(inner);
+    render_action_button(
+        frame,
+        start_rect,
+        Some("↵"),
+        "start",
+        Style::default()
+            .fg(panel_contrast_fg(&app.palette))
+            .bg(app.palette.accent)
+            .add_modifier(Modifier::BOLD),
+    );
+    render_action_button(
+        frame,
+        cancel_rect,
+        Some("esc"),
+        "cancel",
+        Style::default()
+            .fg(app.palette.text)
+            .bg(app.palette.surface0),
+    );
+}
+
+pub(crate) const FILE_BROWSER_POPUP_WIDTH: u16 = 72;
+pub(crate) const FILE_BROWSER_POPUP_HEIGHT: u16 = 18;
+
+/// The list body of the browser popup, in screen coordinates, or `None` when the
+/// popup is too small to draw. Mouse hit-testing and the renderer must agree, so
+/// both derive the rows from here.
+pub(crate) fn file_browser_list_rect(area: Rect) -> Option<Rect> {
+    let popup = centered_popup_rect(area, FILE_BROWSER_POPUP_WIDTH, FILE_BROWSER_POPUP_HEIGHT)?;
+    let inner = Rect::new(
+        popup.x + 1,
+        popup.y + 1,
+        popup.width.saturating_sub(2),
+        popup.height.saturating_sub(2),
+    );
+    if inner.height < 6 {
+        return None;
+    }
+    Some(browser_rows(inner)[3])
+}
+
+fn browser_rows(inner: Rect) -> [Rect; 5] {
+    Layout::vertical([
+        Constraint::Length(1), // title
+        Constraint::Length(1), // cwd
+        Constraint::Length(1), // filter / destination
+        Constraint::Min(1),    // list
+        Constraint::Length(1), // footer
+    ])
+    .areas::<5>(inner)
+}
+
+pub(super) fn render_file_transfer_browser(app: &AppState, frame: &mut Frame, area: Rect) {
+    super::dim_background(frame, area);
+
+    let Some(browser) = app.file_browser.as_ref() else {
+        return;
+    };
+    let Some(inner) = render_modal_shell(
+        frame,
+        area,
+        FILE_BROWSER_POPUP_WIDTH,
+        FILE_BROWSER_POPUP_HEIGHT,
+        &app.palette,
+    ) else {
+        return;
+    };
+    if inner.height < 6 {
+        return;
+    }
+
+    let rows = browser_rows(inner);
+
+    render_modal_header(frame, rows[0], "receive file", &app.palette);
+
+    // The path is what tells the user which machine and directory they are in,
+    // so elide the middle rather than the end.
+    frame.render_widget(
+        Paragraph::new(middle_elide(
+            &browser.dir.to_string_lossy(),
+            rows[1].width as usize,
+        ))
+        .style(Style::default().fg(app.palette.overlay0)),
+        rows[1],
+    );
+
+    let filter = if !browser.query.is_empty() {
+        format!("filter: {}", browser.query)
+    } else if browser.destination.is_empty() {
+        // No client reported one, so name the setting rather than guess a path.
+        "→ set remote.file_transfer_dir on your machine".to_owned()
+    } else {
+        format!("→ {}", browser.destination)
+    };
+    let filter_style = if browser.query.is_empty() {
+        Style::default().fg(app.palette.surface_dim)
+    } else {
+        Style::default().fg(app.palette.text)
+    };
+    frame.render_widget(
+        Paragraph::new(truncate_end(&filter, rows[2].width as usize)).style(filter_style),
+        rows[2],
+    );
+
+    if let Some(error) = browser.error.as_ref() {
+        frame.render_widget(
+            Paragraph::new(error.as_str())
+                .style(Style::default().fg(app.palette.red))
+                .wrap(Wrap { trim: true }),
+            rows[3],
+        );
+    } else {
+        render_file_browser_list(app, browser, frame, rows[3]);
+    }
+
+    let footer = if browser.truncated {
+        format!(
+            "↑↓ move   ↵ open/select   . hidden   esc cancel   (first {} shown)",
+            crate::app::state::FILE_BROWSER_MAX_ENTRIES
+        )
+    } else {
+        "↑↓ move   ↵ open/select   . hidden   esc cancel".to_owned()
+    };
+    frame.render_widget(
+        Paragraph::new(truncate_end(&footer, rows[4].width as usize))
+            .style(Style::default().fg(app.palette.overlay0)),
+        rows[4],
+    );
+}
+
+fn render_file_browser_list(
+    app: &AppState,
+    browser: &crate::app::state::FileBrowserState,
+    frame: &mut Frame,
+    area: Rect,
+) {
+    let indices = browser.filtered_indices();
+    if indices.is_empty() {
+        frame.render_widget(
+            Paragraph::new("no matching entries")
+                .style(Style::default().fg(app.palette.surface_dim)),
+            area,
+        );
+        return;
+    }
+
+    let visible = area.height as usize;
+    let start = browser.window_start(visible);
+
+    for (row, entry_idx) in indices.iter().skip(start).take(visible).enumerate() {
+        let Some(entry) = browser.entries.get(*entry_idx) else {
+            continue;
+        };
+        let y = area.y + row as u16;
+        let selected = *entry_idx == browser.selected;
+        let style = if selected {
+            Style::default()
+                .fg(panel_contrast_fg(&app.palette))
+                .bg(app.palette.accent)
+                .add_modifier(Modifier::BOLD)
+        } else if entry.is_dir {
+            Style::default().fg(app.palette.blue)
+        } else {
+            Style::default().fg(app.palette.text)
+        };
+
+        // Size is right-aligned in its own column so the names stay scannable.
+        let size = entry.size.map(human_bytes).unwrap_or_else(|| {
+            if entry.is_dir {
+                String::new()
+            } else {
+                "?".into()
+            }
+        });
+        let size_width = size.len().min(area.width as usize);
+        let name_width = (area.width as usize).saturating_sub(size_width + 5);
+        let marker = if selected { "▸" } else { " " };
+        let name = if entry.is_dir && !entry.is_parent {
+            format!("{}/", entry.name)
+        } else {
+            entry.name.clone()
+        };
+        // Pad by display width, not char count: `truncate_end` clips on columns,
+        // so a CJK or emoji name has fewer chars than columns and `{:<width$}`
+        // would overshoot and push the size column off the end of the row.
+        let shown = truncate_end(&name, name_width);
+        let pad = " ".repeat(name_width.saturating_sub(display_width(&shown)));
+        let line = format!(" {marker} {shown}{pad} {size:>size_width$} ");
+        frame.render_widget(
+            Paragraph::new(truncate_end(&line, area.width as usize)).style(style),
+            Rect::new(area.x, y, area.width, 1),
+        );
+    }
+}
+
+fn human_bytes(bytes: u64) -> String {
+    const KIB: u64 = 1024;
+    const MIB: u64 = 1024 * KIB;
+    if bytes >= MIB {
+        format!("{:.1} MiB", bytes as f64 / MIB as f64)
+    } else if bytes >= KIB {
+        format!("{:.1} KiB", bytes as f64 / KIB as f64)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+fn progress_bar(ratio: f64, width: u16) -> String {
+    let width = width as usize;
+    let filled = ((ratio * width as f64).round() as usize).min(width);
+    format!("{}{}", "█".repeat(filled), "░".repeat(width - filled))
+}
+
+pub(super) fn render_file_transfer_progress(app: &AppState, frame: &mut Frame, area: Rect) {
+    super::dim_background(frame, area);
+
+    let Some(transfer) = app.file_transfer.as_ref() else {
+        return;
+    };
+    let Some(inner) = render_modal_shell(
+        frame,
+        area,
+        FILE_TRANSFER_POPUP_WIDTH,
+        FILE_TRANSFER_POPUP_HEIGHT,
+        &app.palette,
+    ) else {
+        return;
+    };
+    if inner.height < 5 {
+        return;
+    }
+
+    let rows = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(0),
+    ])
+    .areas::<5>(inner);
+
+    render_modal_header(frame, rows[0], transfer.direction.title(), &app.palette);
+    frame.render_widget(
+        Paragraph::new(truncate_end(&transfer.name, rows[1].width as usize))
+            .style(Style::default().fg(app.palette.text)),
+        rows[1],
+    );
+
+    let (_, dismiss_rect) = file_transfer_button_rects(inner);
+
+    match transfer.outcome.as_ref() {
+        Some(Err(error)) => {
+            // Derived from the button row rather than fixed at 2: the buttons
+            // are drawn after this, so anything that reaches their row is
+            // overprinted mid-sentence.
+            let height = dismiss_rect.y.saturating_sub(rows[2].y).max(1);
+            frame.render_widget(
+                Paragraph::new(error.as_str())
+                    .style(Style::default().fg(app.palette.red))
+                    .wrap(Wrap { trim: true }),
+                Rect::new(rows[2].x, rows[2].y, rows[2].width, height),
+            );
+        }
+        outcome => {
+            frame.render_widget(
+                Paragraph::new(progress_bar(transfer.ratio(), rows[2].width))
+                    .style(Style::default().fg(app.palette.accent)),
+                rows[2],
+            );
+            let status = if outcome.is_some() {
+                format!("done — {}", human_bytes(transfer.size))
+            } else {
+                format!(
+                    "{} / {}",
+                    human_bytes(transfer.done),
+                    human_bytes(transfer.size)
+                )
+            };
+            frame.render_widget(
+                Paragraph::new(status).style(Style::default().fg(app.palette.overlay0)),
+                rows[3],
+            );
+        }
+    }
+
+    render_action_button(
+        frame,
+        dismiss_rect,
+        Some("esc"),
+        if transfer.finished() {
+            "close"
+        } else {
+            "cancel"
+        },
+        Style::default()
+            .fg(app.palette.text)
+            .bg(app.palette.surface0),
     );
 }
 
@@ -797,8 +1175,67 @@ mod tests {
     };
 
     use super::{
-        confirm_close_overlay_text, render_new_linked_worktree_overlay, render_rename_overlay,
+        confirm_close_overlay_text, render_file_transfer_progress,
+        render_new_linked_worktree_overlay, render_rename_overlay,
     };
+
+    /// The failure message is the only thing the popup has to say when a
+    /// transfer fails, and the action buttons are drawn after it. A fixed-height
+    /// error rect reached their row and they overprinted the second line
+    /// mid-sentence.
+    #[test]
+    fn a_wrapped_transfer_failure_is_not_overprinted_by_the_button_row() {
+        // Long enough that the wrapped second line reaches the centred buttons.
+        // `NoFreeName` quotes the file name, so any ordinary long name gets
+        // there; so does any failure string the peer chose.
+        let error = format!(
+            "could not find a free name for {} at the destination",
+            "quarterly-report-final-v2".repeat(2)
+        );
+        let error = error.as_str();
+        let mut app = AppState::test_new();
+        app.mode = Mode::FileTransferProgress;
+        app.file_transfer = Some(crate::app::state::FileTransferState {
+            direction: crate::app::state::FileTransferDirection::Upload,
+            name: "huge.bin".to_owned(),
+            size: 268_435_457,
+            done: 0,
+            outcome: Some(Err(error.to_owned())),
+        });
+
+        let area = Rect::new(0, 0, 100, 30);
+        let mut terminal =
+            Terminal::new(TestBackend::new(area.width, area.height)).expect("test terminal");
+        terminal
+            .draw(|frame| render_file_transfer_progress(&app, frame, area))
+            .expect("progress popup should render");
+
+        let buffer = terminal.backend().buffer().clone();
+        let popup = super::centered_popup_rect(
+            area,
+            super::FILE_TRANSFER_POPUP_WIDTH,
+            super::FILE_TRANSFER_POPUP_HEIGHT,
+        )
+        .expect("popup fits");
+        let inner = Rect::new(popup.x + 1, popup.y + 1, popup.width - 2, popup.height - 2);
+        let (_, dismiss) = super::file_transfer_button_rects(inner);
+
+        // The button is drawn last, so anything else that reaches its row is
+        // stamped through mid-word. Nothing but the button may live there.
+        let spill: String = (inner.x..inner.right())
+            .filter(|x| !(dismiss.x..dismiss.right()).contains(x))
+            .map(|x| buffer[(x, dismiss.y)].symbol())
+            .collect();
+        assert!(
+            spill.trim().is_empty(),
+            "error text reached the button row: {spill:?}"
+        );
+
+        let button: String = (dismiss.x..dismiss.right())
+            .map(|x| buffer[(x, dismiss.y)].symbol())
+            .collect();
+        assert!(button.contains("close"), "dismiss button should render");
+    }
 
     #[test]
     fn confirm_close_text_uses_live_workspace_cwd_label() {
@@ -1154,5 +1591,57 @@ mod tests {
             worktree_overlay_caret("あい"),
             Position::new(input.x + 5, input.y)
         );
+    }
+
+    #[test]
+    fn the_receive_browser_lays_out_names_and_sizes_without_clipping() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let dir = std::env::temp_dir().join(format!(
+            "herdr-browser-render-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("build")).expect("dir");
+        std::fs::write(dir.join("report.pdf"), vec![0u8; 2_500_000]).expect("file");
+        std::fs::write(dir.join("notes.md"), b"hi").expect("file");
+
+        let mut app = AppState::test_new();
+        crate::app::open_file_transfer_browser_for_test(&mut app, dir.clone());
+        let area = Rect::new(0, 0, 100, 26);
+        let mut terminal =
+            Terminal::new(TestBackend::new(area.width, area.height)).expect("test terminal");
+        terminal
+            .draw(|frame| super::render_file_transfer_browser(&app, frame, area))
+            .expect("browser should render");
+        let buf = terminal.backend().buffer().clone();
+        let rows: Vec<String> = (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect();
+        let screen = rows.join("\n");
+
+        assert!(screen.contains("receive file"), "{screen}");
+        // Directories sort first and are marked; the parent row is always offered.
+        let dirs_row = rows
+            .iter()
+            .position(|r| r.contains("build/"))
+            .expect("dirs");
+        let files_row = rows
+            .iter()
+            .position(|r| r.contains("notes.md"))
+            .expect("files");
+        assert!(dirs_row < files_row, "directories must sort above files");
+        assert!(screen.contains(".."), "the parent row must be offered");
+
+        // The size column must land whole. An off-by-one in the row width shows
+        // up here as a truncated "2.4 Mi…" and nowhere else.
+        assert!(screen.contains("2.4 MiB"), "size column clipped:\n{screen}");
+        assert!(screen.contains("2 B"), "small size clipped:\n{screen}");
+        assert!(!screen.contains("Mi…"), "size column clipped:\n{screen}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
