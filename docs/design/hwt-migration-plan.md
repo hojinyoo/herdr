@@ -68,9 +68,16 @@ at :52), `src/app/api/workspaces.rs`, `src/app/api/plugins/mod.rs` (context payl
    over-protecting a label costs a missing chip, under-protecting costs a rename that can reach another
    machine.
 3. Persist `label_origin` on `WorkspaceSnapshot` behind `#[serde(default)]`.
-4. Load migration: an absent field runs the basename heuristic exactly once (label ==
-   `basename(identity_cwd)` gives `Derived`, anything else gives `User`) and records the answer. Never
-   re-run. This is the same rule hwt runs on every pass, run once.
+4. Load migration: an absent field compares the stored label against
+   `automatic_workspace_label(cwd, repo_root)` (`src/workspace/git/discovery.rs:63`) exactly once, equal
+   giving `Derived` and anything else `User`, and records the answer. Never re-run.
+   **Do not reimplement the comparison as a basename check.** The function returns `basename(repo_root)`,
+   not `basename(cwd)`, and falls back to a cwd-derived label only when `repo_root` has no filename;
+   a hand-rolled basename test misclassifies source checkouts and embedded bare repos. Calling it is
+   also what makes the answer exact rather than a heuristic, since hwt could only guess from outside.
+   **Do not reach for a null check on `custom_name` either.** `src/workspace.rs:256` stores the computed
+   automatic label into `custom_name` at construction, so every existing workspace has a non-null value
+   and null-ness carries no information.
 5. Expose `label_origin` on `WorkspaceInfo` and in `HERDR_PLUGIN_CONTEXT_JSON`.
 6. Nothing reads it to gate a write yet. Stage 6 does.
 
@@ -90,7 +97,13 @@ both already PTY-free), `src/api/schema/worktrees.rs`, `src/app/api/worktrees.rs
 1. `WorktreeState` with the spec's seven variants, serialized snake_case. It is a wire format, so a
    variant serializes as its own value.
 2. Pure `classify(...) -> WorktreeState` taking git-side facts plus the workspace side. No `App`, no PTY.
-3. `WorktreeInfo` gains `state` and `path` becomes `Option<String>`.
+3. `WorktreeInfo` gains `state` and `path` becomes `Option<String>`, carrying
+   `#[serde(skip_serializing_if = "Option::is_none")]`. That attribute is a requirement, not a style
+   choice: `WorktreeInfo` is not only the `worktree list` row. It is also in the event payload
+   (`src/events.rs:48`) and the plugin context payload (`src/app/api/plugins/mod.rs`), and hwt parses
+   the latter on its `--from-context` path. Skipping `None` keeps `path` present for every entry that
+   has one, so the three surfaces stay readable and the checkout-less entries simply fail hwt's join key
+   the way an absent entry does today. Without it, Stage 3 breaks hwt while hwt is still in use.
 4. Synthesize `orphan_workspace` entries (recorded membership whose checkout is absent) inline.
    `branch_only` entries are opt-in behind a list param (D7).
 5. `foreign` keeps the submodule and bare detection: a submodule reports `path` as
@@ -106,8 +119,11 @@ the API schema artifact. Changelog entry.
 **Acceptance.** Table-driven classification including the submodule shape. `status` honours the rc
 contract. The default `worktree list` call runs no `git for-each-ref`.
 
-**Risk.** `WorktreeInfo` is consumed by the TUI dialogs in `src/app/worktrees.rs`; optional `path`
-touches them. Characterization tests first.
+**Risk.** The production consumers of `WorktreeInfo` are `src/app/api/worktrees.rs`, the event payload
+in `src/events.rs` and the plugin context payload in `src/app/api/plugins/mod.rs`. The TUI is not one of
+them: `src/app/worktrees.rs` builds a `WorktreeInfo` only inside its `#[cfg(test)]` module and uses
+`WorktreeSpaceMembership` in production. Characterization tests belong on the three API surfaces, not on
+the dialogs.
 
 ## Stage 4: staged teardown
 
