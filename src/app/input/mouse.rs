@@ -233,12 +233,14 @@ impl AppState {
                     if let Some(browser) = self.file_browser.as_mut() {
                         browser.select_previous();
                     }
+                    super::modal::keep_file_browser_selection_visible(self);
                     return None;
                 }
                 MouseEventKind::ScrollDown => {
                     if let Some(browser) = self.file_browser.as_mut() {
                         browser.select_next();
                     }
+                    super::modal::keep_file_browser_selection_visible(self);
                     return None;
                 }
                 MouseEventKind::Down(MouseButton::Left) => {}

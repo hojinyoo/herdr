@@ -222,6 +222,7 @@ pub(super) fn open_file_transfer_browser(
         error: None,
         truncated: false,
         destination,
+        scroll: 0,
     });
     refresh_file_browser(state);
     state.mode = Mode::FileTransferBrowse;
@@ -265,6 +266,7 @@ pub(super) fn refresh_file_browser(state: &mut AppState) {
     browser.entries = entries;
     browser.query.clear();
     browser.selected = 0;
+    browser.scroll = 0;
     browser.clamp_selection();
 }
 
@@ -316,6 +318,20 @@ fn toggle_file_browser_hidden(state: &mut AppState) {
     refresh_file_browser(state);
 }
 
+/// Rows the browser list is currently drawing, from the shared geometry.
+fn file_browser_visible_rows(state: &AppState) -> usize {
+    crate::ui::file_browser_list_rect(state.screen_rect())
+        .map(|rect| rect.height as usize)
+        .unwrap_or(0)
+}
+
+pub(super) fn keep_file_browser_selection_visible(state: &mut AppState) {
+    let visible = file_browser_visible_rows(state);
+    if let Some(browser) = state.file_browser.as_mut() {
+        browser.ensure_selection_visible(visible);
+    }
+}
+
 pub(crate) fn handle_file_transfer_browse_key(state: &mut AppState, key: KeyEvent) {
     match key.code {
         KeyCode::Esc => close_file_browser(state),
@@ -324,11 +340,13 @@ pub(crate) fn handle_file_transfer_browse_key(state: &mut AppState, key: KeyEven
             if let Some(browser) = state.file_browser.as_mut() {
                 browser.select_previous();
             }
+            keep_file_browser_selection_visible(state);
         }
         KeyCode::Down => {
             if let Some(browser) = state.file_browser.as_mut() {
                 browser.select_next();
             }
+            keep_file_browser_selection_visible(state);
         }
         KeyCode::Left => {
             // Same as picking `..`; a browser should go up without hunting.
@@ -362,12 +380,14 @@ pub(crate) fn handle_file_transfer_browse_key(state: &mut AppState, key: KeyEven
                 browser.query.pop();
                 browser.clamp_selection();
             }
+            keep_file_browser_selection_visible(state);
         }
         KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
             if let Some(browser) = state.file_browser.as_mut() {
                 browser.query.push(ch);
                 browser.clamp_selection();
             }
+            keep_file_browser_selection_visible(state);
         }
         _ => {}
     }
@@ -3134,5 +3154,78 @@ mod tests {
         assert_eq!(state.mode, Mode::FileTransferBrowse);
         // `..` is still offered so the user can navigate out.
         assert!(browser.entries.iter().any(|e| e.is_parent));
+    }
+
+    #[test]
+    fn selecting_a_visible_row_does_not_scroll_the_list() {
+        // Clicking a row must not move the list under the pointer: the
+        // click-to-select then click-to-open gesture depends on the row staying
+        // where it was drawn. A window that re-centres on every selection
+        // scrolled it, so the second click landed on a different file.
+        let dir = browser_fixture("noscroll");
+        for i in 0..40 {
+            std::fs::write(dir.join(format!("f{i:02}.txt")), b"x").expect("file");
+        }
+        let mut state = AppState::test_new();
+        open_file_transfer_browser(&mut state, dir.clone(), String::new());
+
+        let visible = 12;
+        let browser = state.file_browser.as_mut().expect("browser");
+        // Scroll well into the list, as a user would before clicking.
+        for _ in 0..20 {
+            browser.select_next();
+            browser.ensure_selection_visible(visible);
+        }
+        let start_before = browser.window_start(visible);
+        assert!(
+            start_before > 0,
+            "the list should be scrolled for this to mean anything"
+        );
+
+        // Pick a row that is already on screen, the way a click does.
+        let indices = browser.filtered_indices();
+        let target = indices[start_before + 2];
+        browser.selected = target;
+        browser.ensure_selection_visible(visible);
+
+        assert_eq!(
+            browser.window_start(visible),
+            start_before,
+            "selecting an already-visible row must not scroll"
+        );
+        // And the row is still where it was drawn.
+        assert_eq!(browser.entry_at_row(2, visible), Some(target));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn moving_off_the_window_scrolls_by_the_minimum() {
+        let dir = browser_fixture("minscroll");
+        for i in 0..40 {
+            std::fs::write(dir.join(format!("f{i:02}.txt")), b"x").expect("file");
+        }
+        let mut state = AppState::test_new();
+        open_file_transfer_browser(&mut state, dir.clone(), String::new());
+        let visible = 12;
+        let browser = state.file_browser.as_mut().expect("browser");
+
+        // Walking down past the bottom edge scrolls one row at a time.
+        for _ in 0..visible {
+            browser.select_next();
+            browser.ensure_selection_visible(visible);
+        }
+        assert_eq!(
+            browser.window_start(visible),
+            1,
+            "should scroll by one, not jump"
+        );
+
+        // Walking back up past the top edge does the same.
+        for _ in 0..visible {
+            browser.select_previous();
+            browser.ensure_selection_visible(visible);
+        }
+        assert_eq!(browser.window_start(visible), 0);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

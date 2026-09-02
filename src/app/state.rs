@@ -1383,6 +1383,11 @@ pub struct FileBrowserState {
     /// Where the selected file will land, as the client resolved it. Empty when
     /// no client reported one, in which case the UI names the setting instead.
     pub destination: String,
+    /// First filtered row drawn. Remembered rather than derived from the
+    /// selection: a window that re-centres on every selection scrolls the list
+    /// out from under the pointer, so clicking a row moves the row you just
+    /// clicked.
+    pub scroll: usize,
 }
 
 /// Directories with more entries than this are listed partially. Reading is
@@ -1439,13 +1444,29 @@ impl FileBrowserState {
         if visible == 0 || indices.len() <= visible {
             return 0;
         }
-        let position = indices
-            .iter()
-            .position(|idx| *idx == self.selected)
-            .unwrap_or(0);
-        position
-            .saturating_sub(visible / 2)
-            .min(indices.len().saturating_sub(visible))
+        self.scroll.min(indices.len() - visible)
+    }
+
+    /// Scrolls the minimum needed to keep the selection on screen. Called after
+    /// anything that moves the selection, so a click never shifts the list.
+    pub(crate) fn ensure_selection_visible(&mut self, visible: usize) {
+        if visible == 0 {
+            return;
+        }
+        let indices = self.filtered_indices();
+        if indices.len() <= visible {
+            self.scroll = 0;
+            return;
+        }
+        let Some(position) = indices.iter().position(|idx| *idx == self.selected) else {
+            return;
+        };
+        if position < self.scroll {
+            self.scroll = position;
+        } else if position >= self.scroll + visible {
+            self.scroll = position + 1 - visible;
+        }
+        self.scroll = self.scroll.min(indices.len() - visible);
     }
 
     /// The entry drawn at `row` of the visible window, if any.
