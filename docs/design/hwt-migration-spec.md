@@ -261,7 +261,9 @@ server.
 
 ## Stages
 
-Each stage ships alone. hwt keeps working until the last one.
+Each stage ships alone. hwt keeps working until the last one. Files touched, per-stage acceptance
+criteria and the repo obligations each one carries are in
+[hwt-migration-plan.md](hwt-migration-plan.md).
 
 1. **This spec.**
 2. **Label provenance.** `label_origin` on the workspace, persisted, exposed on `workspace list` and in
