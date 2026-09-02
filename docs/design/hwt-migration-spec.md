@@ -96,7 +96,7 @@ directory.
 Add `label_origin` to the workspace and persist it in `WorkspaceSnapshot`:
 
 ```
-Derived            herdr computed it (today: basename of the checkout)
+Derived            herdr computed it, through automatic_workspace_label
 User               a human renamed it
 Rule { source }    a naming rule wrote it
 ```
@@ -104,19 +104,26 @@ Rule { source }    a naming rule wrote it
 This one field deletes the ledger, the adoption heuristic, the `custom_name` ambiguity and the mirror
 label guard:
 
-- Adoption today is "current label == `basename(checkout_path)`", and it is known to drift with no human
-  involved. A workspace observed as `worktree-lucky-meadow-716c` later read `DeepMSFlow`, with
-  `custom_name: null` proving nobody typed it. With provenance the question is answered, not inferred.
-- `custom_name` cannot serve: it is also set by `--label`, so `null` proves "never renamed" but non-null
-  proves nothing, and `session.json` lags a rename by at least one generation.
+- Adoption today is "current label == `basename(checkout_path)`", which is hwt reimplementing a
+  derivation it cannot call. herdr's own is `automatic_workspace_label(cwd, repo_root)`
+  (`src/workspace/git/discovery.rs:63`): `basename(repo_root)`, falling back to a cwd-derived label only
+  when `repo_root` has no filename. For a linked worktree `repo_root` is that worktree's own root, which
+  is why the two usually agree; for a source checkout or an embedded bare repo they do not. Inside herdr
+  the comparison is exact because the function is callable, which also retires hwt's open question about
+  the derived label drifting off the basename.
+- `custom_name` cannot serve, and the source says why hwt's measurement came out as it did:
+  `src/workspace.rs:256` stores the computed automatic label **into** `custom_name` at construction. So
+  every existing workspace has a non-null `custom_name`, null-ness proves nothing in either direction,
+  and `session.json` lags a rename by at least one generation on top of that.
 - The mirror renames real workspaces on other machines off a local label change
   (`mirror.rs:301` `resolve_label`, pushed at `:780`, on a 60 s poll). hwt refuses to write any label
   that renders into a mirror prefix shape, derived from `~/.config/herdr-mirror/hosts.toml`, failing
   closed when that file is unreadable. Provenance lets the mirror ask instead. Until the mirror reads
   it, derived labels must still not be written to workspaces the mirror owns.
 
-Migration for existing sessions: the field is absent, so `#[serde(default)]` runs the basename
-heuristic exactly once at load and records the answer. Same rule hwt runs on every pass, run once.
+Migration for existing sessions: the field is absent, so `#[serde(default)]` compares the stored label
+against a freshly computed `automatic_workspace_label` exactly once at load and records the answer. Same
+question hwt asks on every pass, asked once and answered exactly.
 
 ### Tokens do not persist
 
