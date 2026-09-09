@@ -1823,6 +1823,37 @@ async fn run_client_loop(
                             }
                             continue;
                         }
+                        if kind == crate::protocol::file_transfer::SERVER_FILE_TRANSFER_KIND {
+                            let Some(shell) = state.shell.as_mut() else {
+                                continue;
+                            };
+                            // A malformed control is the peer's problem, not
+                            // this session's: it must not drop the panes.
+                            let Ok(control) = serde_json::from_str(&data) else {
+                                debug!("ignoring malformed file transfer control");
+                                continue;
+                            };
+                            let outcome = shell.handle_file_transfer_control(control);
+                            let frame = outcome
+                                .repaint
+                                .then(|| {
+                                    shell.compose(state.reported_size.0, state.reported_size.1)
+                                })
+                                .flatten();
+                            if finish_client_shell_input(
+                                &mut state,
+                                outcome,
+                                frame,
+                                &mut write_stream,
+                                &mut pending_activation,
+                                &mut endpoint_commands,
+                                &mut prefix_input_source,
+                                &event_tx,
+                            )? {
+                                return Ok(());
+                            }
+                            continue;
+                        }
                         let snapshot = match endpoint::decode_endpoint_control(&kind, &data) {
                             Ok(endpoint::EndpointControlMessage::HealthPong) => continue,
                             Ok(endpoint::EndpointControlMessage::Ignored) => {

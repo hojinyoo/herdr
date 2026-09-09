@@ -461,6 +461,7 @@ impl ClientShellState {
                 navigator.selected = None;
                 true
             }
+            Some(ClientShellOverlay::FileTransfer(_)) => self.insert_file_transfer_text(text),
             _ => false,
         }
     }
@@ -587,6 +588,11 @@ impl ClientShellState {
                 }
                 _ => {}
             }
+            return;
+        }
+
+        if matches!(self.overlay, Some(ClientShellOverlay::FileTransfer(_))) {
+            self.route_file_transfer_key(key, outcome);
             return;
         }
 
