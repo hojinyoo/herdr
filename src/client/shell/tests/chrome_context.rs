@@ -384,3 +384,192 @@ fn close_confirmation_error_becomes_client_owned_overlay_and_stable_group_close(
             if params.workspace_id == "ws_1" && params.close_group
     ));
 }
+
+fn snapshot_with_plugin_actions() -> ClientShellSnapshot {
+    use crate::protocol::{ClientShellPluginAction, ClientShellPluginActionContext};
+
+    let mut snapshot = snapshot();
+    snapshot.plugin_actions = vec![
+        ClientShellPluginAction {
+            action_id: "example.worktree.status".into(),
+            title: "Worktree status".into(),
+            contexts: vec![ClientShellPluginActionContext::Workspace],
+        },
+        ClientShellPluginAction {
+            action_id: "example.pane-tools.inspect".into(),
+            title: "Inspect pane".into(),
+            contexts: vec![ClientShellPluginActionContext::Pane],
+        },
+    ];
+    snapshot
+}
+
+fn open_workspace_context_menu(state: &mut ClientShellState) {
+    state.compose(106, 20).expect("composed frame");
+    let workspace = state.hits.workspaces[0].rect;
+    state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Right),
+        column: workspace.x + 2,
+        row: workspace.y,
+        modifiers: KeyModifiers::empty(),
+    })]);
+    state.compose(106, 20).expect("workspace context menu");
+}
+
+fn menu_labels(state: &ClientShellState) -> Vec<String> {
+    match state.overlay.as_ref() {
+        Some(ClientShellOverlay::ContextMenu(menu)) => menu
+            .items()
+            .iter()
+            .map(|item| item.label.to_owned())
+            .collect(),
+        _ => panic!("context menu"),
+    }
+}
+
+#[test]
+fn context_menus_list_only_the_plugin_actions_declared_for_that_context() {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(snapshot_with_plugin_actions()));
+    state.set_pane_surface(surface());
+
+    open_workspace_context_menu(&mut state);
+    let workspace_labels = menu_labels(&state);
+    assert_eq!(
+        workspace_labels,
+        &[
+            "Rename",
+            "Close",
+            "New worktree",
+            "Open worktree...",
+            "Worktree status"
+        ]
+    );
+
+    state.overlay = None;
+    state.compose(106, 20).expect("composed frame");
+    let pane = state.hits.panes[0].rect;
+    state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Right),
+        column: pane.x + 1,
+        row: pane.y,
+        modifiers: KeyModifiers::empty(),
+    })]);
+    state.compose(106, 20).expect("pane context menu");
+    let pane_labels = menu_labels(&state);
+    assert_eq!(pane_labels.last().map(String::as_str), Some("Inspect pane"));
+    assert!(!pane_labels.iter().any(|label| label == "Worktree status"));
+    assert_eq!(pane_labels.first().map(String::as_str), Some("Rename pane"));
+}
+
+/// Clicking an entry does not move Herdr's focus, so the request has to name
+/// the clicked target itself.
+#[test]
+fn a_plugin_context_menu_entry_invokes_it_scoped_to_the_clicked_row() {
+    let mut snapshot = snapshot_with_plugin_actions();
+    // The clicked workspace is deliberately not the focused one.
+    snapshot.focused_workspace_id = Some("ws_2".into());
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(snapshot));
+    state.set_pane_surface(surface());
+
+    open_workspace_context_menu(&mut state);
+    let index = menu_labels(&state)
+        .iter()
+        .position(|label| label == "Worktree status")
+        .expect("plugin entry listed");
+    let row = state.hits.context_menu_rows[index].0;
+    let outcome =
+        state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: row.x + 1,
+            row: row.y,
+            modifiers: KeyModifiers::empty(),
+        })]);
+
+    let [ClientShellAction::Endpoint { request, .. }] = &outcome.actions[..] else {
+        panic!("plugin context action should use the endpoint API");
+    };
+    let crate::api::schema::Method::PluginActionInvoke(params) = &request.method else {
+        panic!("expected a plugin action invoke, got {:?}", request.method);
+    };
+    assert_eq!(params.action_id, "example.worktree.status");
+    let context = params.context.as_ref().expect("scoped context");
+    assert_eq!(context.workspace_id.as_deref(), Some("ws_1"));
+    assert_eq!(context.invocation_source.as_deref(), Some("context_menu"));
+}
+
+/// Entries are frozen at open. A snapshot landing under an open menu must not
+/// move an entry out from under the pointer: these run without confirmation.
+#[test]
+fn a_snapshot_arriving_under_an_open_menu_does_not_move_its_entries() {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(snapshot_with_plugin_actions()));
+    state.set_pane_surface(surface());
+    open_workspace_context_menu(&mut state);
+    let before = menu_labels(&state);
+
+    let mut replacement = snapshot_with_plugin_actions();
+    replacement.revision = 2;
+    replacement.plugin_actions.clear();
+    state.set_snapshot(Box::new(replacement));
+    let mut replacement_surface = surface();
+    replacement_surface.projection_revision = 2;
+    state.set_pane_surface(replacement_surface);
+    state.compose(106, 20).expect("recomposed frame");
+
+    assert_eq!(menu_labels(&state), before);
+}
+
+/// A menu taller than the screen draws only what fits. The highlight must stay
+/// inside that set, or Enter runs an entry the user cannot see.
+#[test]
+fn the_highlight_cannot_leave_the_entries_the_menu_actually_drew() {
+    use crate::protocol::{ClientShellPluginAction, ClientShellPluginActionContext};
+
+    let mut snapshot = snapshot();
+    snapshot.plugin_actions = (0..40)
+        .map(|index| ClientShellPluginAction {
+            action_id: format!("example.many.a{index:02}"),
+            title: format!("Action {index:02}"),
+            contexts: vec![ClientShellPluginActionContext::Workspace],
+        })
+        .collect();
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(snapshot));
+    state.set_pane_surface(surface());
+
+    state.compose(106, 20).expect("composed frame");
+    let workspace = state.hits.workspaces[0].rect;
+    state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Right),
+        column: workspace.x + 2,
+        row: workspace.y,
+        modifiers: KeyModifiers::empty(),
+    })]);
+    state.compose(106, 20).expect("workspace context menu");
+
+    let drawn = state.hits.context_menu_rows.len();
+    let total = menu_labels(&state).len();
+    assert!(
+        drawn < total,
+        "test needs a menu taller than the screen: drew {drawn} of {total}"
+    );
+
+    for _ in 0..total {
+        state.move_context_menu_selection(1);
+    }
+    let highlighted = match state.overlay.as_ref() {
+        Some(ClientShellOverlay::ContextMenu(menu)) => menu.highlighted,
+        _ => panic!("context menu"),
+    };
+    assert!(
+        highlighted < drawn,
+        "highlight {highlighted} escaped the {drawn} drawn entries"
+    );
+    assert!(state
+        .hits
+        .context_menu_rows
+        .iter()
+        .any(|(_, index)| *index == highlighted));
+}

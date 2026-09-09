@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 // ---------------------------------------------------------------------------
 
 /// Current protocol version. Bumped when wire format changes incompatibly.
-pub const PROTOCOL_VERSION: u32 = 22;
+pub const PROTOCOL_VERSION: u32 = 23;
 
 /// Maximum allowed frame payload size (2 MB). Frames larger than this are
 /// rejected to prevent denial-of-service via oversized length prefixes.
@@ -941,6 +941,9 @@ pub struct ClientShellSnapshot {
     pub panes: Vec<ClientShellPane>,
     pub agents: Vec<ClientShellAgent>,
     pub commands: Vec<ClientShellCommand>,
+    /// An endpoint that does not send it offers no plugin entries.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub plugin_actions: Vec<ClientShellPluginAction>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1002,6 +1005,28 @@ pub struct ClientShellCommand {
     pub binding_labels: Vec<String>,
     pub action: ClientShellCommandAction,
     pub description: Option<String>,
+}
+
+/// A plugin action the endpoint will accept for a context-scoped invocation.
+/// The endpoint has already dropped actions from disabled plugins and actions
+/// its own platform cannot run, and sanitized the title, because a client
+/// cannot decide any of those for a remote host.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientShellPluginAction {
+    /// Qualified `plugin_id.action_id`, so duplicate action ids across plugins
+    /// resolve through the endpoint's existing lookup rule.
+    pub action_id: String,
+    pub title: String,
+    pub contexts: Vec<ClientShellPluginActionContext>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ClientShellPluginActionContext {
+    Workspace,
+    Pane,
+    /// A future context kind that this client cannot place.
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2727,6 +2752,11 @@ mod tests {
                 binding_labels: vec!["prefix+z".into()],
                 action: ClientShellCommandAction::Shell,
                 description: Some("deploy".into()),
+            }],
+            plugin_actions: vec![ClientShellPluginAction {
+                action_id: "example.worktree.status".into(),
+                title: "Worktree status".into(),
+                contexts: vec![ClientShellPluginActionContext::Workspace],
             }],
         }));
         let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();

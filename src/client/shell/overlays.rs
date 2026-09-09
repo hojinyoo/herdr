@@ -181,7 +181,9 @@ pub(crate) fn render_context_menu(
         .saturating_add(4)
         .max(14)
         .min(screen.width.max(1));
-    let height = (items.len() as u16)
+    // Plugin entries make the count unbounded.
+    let height = u16::try_from(items.len())
+        .unwrap_or(u16::MAX)
         .saturating_add(2)
         .min(screen.height.max(1));
     let x = menu

@@ -16,6 +16,7 @@ use crate::app::App;
 pub(super) use manifest::normalize_plugin_id;
 use manifest::{
     effective_platforms, ensure_platform_supported, normalize_action_id, normalize_plugin_source,
+    platform_supported,
 };
 
 #[cfg(test)]
@@ -200,7 +201,10 @@ impl App {
         ) {
             return encode_error(id, code, message);
         }
-        let context = self.merge_plugin_context(params.context, &id);
+        let context = match self.merge_plugin_context(params.context, &id) {
+            Ok(context) => context,
+            Err((code, message)) => return encode_error(id, code, message),
+        };
         let log = match self.start_plugin_command(
             &plugin,
             Some(action.action_id.clone()),
@@ -220,6 +224,65 @@ impl App {
                 log,
             },
         )
+    }
+
+    /// Plugin actions projected to client-owned chrome. Everything a client
+    /// cannot decide for a remote host is resolved here: which plugins are
+    /// enabled, which actions this platform can run, and the displayed title.
+    ///
+    /// Runs once per render pass per attached client, so it reads the manifest
+    /// fields directly rather than building `PluginActionInfo`, which would
+    /// clone each action's argv and description for nothing.
+    pub(crate) fn client_shell_plugin_actions(
+        &self,
+    ) -> Vec<crate::protocol::ClientShellPluginAction> {
+        use crate::api::schema::PluginActionContext;
+        use crate::protocol::ClientShellPluginActionContext as WireContext;
+
+        let mut actions = self
+            .state
+            .installed_plugins
+            .values()
+            .filter(|plugin| plugin.enabled && plugin_manifest_available(plugin))
+            .flat_map(|plugin| {
+                plugin.actions.iter().filter_map(move |action| {
+                    // Resolve inherited plugin platforms the way the invoke
+                    // path does, or an entry is offered that fails on click.
+                    if !platform_supported(effective_platforms(
+                        &action.platforms,
+                        &plugin.platforms,
+                    )) {
+                        return None;
+                    }
+                    let contexts = action
+                        .contexts
+                        .iter()
+                        .filter_map(|context| match context {
+                            PluginActionContext::Workspace => Some(WireContext::Workspace),
+                            PluginActionContext::Pane => Some(WireContext::Pane),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>();
+                    if contexts.is_empty() {
+                        return None;
+                    }
+                    let action_id = format!("{}.{}", plugin.plugin_id, action.id);
+                    // Third-party text entering a client's chrome: bidi
+                    // overrides could reorder a title to read like a built-in
+                    // entry, and the length is otherwise unbounded.
+                    let title = crate::app::tab_bar_status::sanitize_status_text(&action.title)
+                        .unwrap_or_else(|| action_id.clone());
+                    Some(crate::protocol::ClientShellPluginAction {
+                        action_id,
+                        title,
+                        contexts,
+                    })
+                })
+            })
+            .collect::<Vec<_>>();
+        // Stable order: the registry is a hash map.
+        actions.sort_by(|a, b| a.action_id.cmp(&b.action_id));
+        actions
     }
 
     pub(crate) fn invoke_plugin_action_from_keybind(
@@ -904,6 +967,283 @@ action = "bootstrap"
             result.contains("plugin_linked"),
             "expected plugin_linked: {result}"
         );
+    }
+
+    fn foreign_platform() -> &'static str {
+        if cfg!(target_os = "linux") {
+            "windows"
+        } else {
+            "linux"
+        }
+    }
+
+    fn menu_action_manifest(plugin_id: &str, title: &str, extra: &str) -> String {
+        format!(
+            r#"
+id = "{plugin_id}"
+name = "Menu"
+version = "0.1.0"
+min_herdr_version = "0.6.10"
+{extra}
+
+[[actions]]
+id = "status"
+title = "{title}"
+contexts = ["workspace"]
+command = ["true"]
+"#
+        )
+    }
+
+    fn projected_titles(app: &App) -> Vec<String> {
+        app.client_shell_plugin_actions()
+            .into_iter()
+            .map(|action| action.title)
+            .collect()
+    }
+
+    #[test]
+    fn projected_plugin_actions_carry_the_contexts_they_declare() {
+        let mut app = test_app();
+        let root = unique_temp_path("plugin-projection");
+        write_manifest_content(&root, &menu_action_manifest("example.menu", "Status", ""));
+        link_manifest(&mut app, &root);
+
+        let actions = app.client_shell_plugin_actions();
+
+        assert_eq!(actions.len(), 1, "unexpected projection: {actions:?}");
+        assert_eq!(actions[0].action_id, "example.menu.status");
+        assert_eq!(actions[0].title, "Status");
+        assert_eq!(
+            actions[0].contexts,
+            vec![crate::protocol::ClientShellPluginActionContext::Workspace]
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn projected_plugin_actions_skip_disabled_plugins() {
+        let mut app = test_app();
+        let root = unique_temp_path("plugin-projection-disabled");
+        write_manifest_content(&root, &menu_action_manifest("example.off", "Status", ""));
+        link_manifest(&mut app, &root);
+        assert_eq!(projected_titles(&app), &["Status"]);
+
+        let disabled = app.set_plugin_enabled("disable".into(), "example.off".into(), false);
+        assert!(!disabled.contains("\"error\""), "unexpected: {disabled}");
+
+        assert!(app.client_shell_plugin_actions().is_empty());
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn projected_plugin_actions_skip_a_foreign_platform_inherited_from_the_plugin() {
+        let mut app = test_app();
+        let root = unique_temp_path("plugin-projection-platform");
+        write_manifest_content(
+            &root,
+            &menu_action_manifest(
+                "example.elsewhere",
+                "Status",
+                &format!("platforms = [\"{}\"]", foreign_platform()),
+            ),
+        );
+        link_manifest(&mut app, &root);
+
+        assert!(app.client_shell_plugin_actions().is_empty());
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn projected_plugin_titles_are_sanitized_and_fall_back_to_the_action_id() {
+        let mut app = test_app();
+        let spoof = unique_temp_path("plugin-projection-spoof");
+        write_manifest_content(
+            &spoof,
+            &menu_action_manifest("example.spoof", "Close\u{202e} pane\u{200b}", ""),
+        );
+        link_manifest(&mut app, &spoof);
+        let empty = unique_temp_path("plugin-projection-empty");
+        write_manifest_content(
+            &empty,
+            &menu_action_manifest("example.empty", "\u{202e}\u{200b}", ""),
+        );
+        link_manifest(&mut app, &empty);
+
+        let actions = app.client_shell_plugin_actions();
+        let spoofed = actions
+            .iter()
+            .find(|action| action.action_id == "example.spoof.status")
+            .expect("spoof action");
+        assert!(
+            !spoofed.title.chars().any(|c| c.is_control()
+                || matches!(c, '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}')),
+            "bidi/zero-width characters must not reach a client entry: {:?}",
+            spoofed.title
+        );
+        let emptied = actions
+            .iter()
+            .find(|action| action.action_id == "example.empty.status")
+            .expect("empty-title action");
+        assert_eq!(emptied.title, "example.empty.status");
+
+        let _ = std::fs::remove_dir_all(spoof);
+        let _ = std::fs::remove_dir_all(empty);
+    }
+
+    /// The target named by the caller must scope the invocation, or a plugin
+    /// reading the context acts on whichever workspace happens to be active.
+    #[cfg(unix)]
+    #[test]
+    fn an_invocation_context_is_based_on_the_named_workspace_not_the_active_one() {
+        let mut app = test_app();
+        app.state.workspaces = vec![
+            crate::workspace::Workspace::test_new("active"),
+            crate::workspace::Workspace::test_new("named"),
+        ];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        let active_workspace_id = app.public_workspace_id(0);
+        let named_workspace_id = app.public_workspace_id(1);
+
+        let root = unique_temp_path("plugin-scoped-context");
+        let capture = root.join("context.json");
+        write_manifest_content(
+            &root,
+            &format!(
+                r#"
+id = "example.scoped"
+name = "Scoped"
+version = "0.1.0"
+min_herdr_version = "0.6.10"
+
+[[actions]]
+id = "status"
+title = "Status"
+contexts = ["workspace"]
+command = ["sh", "-c", "printf '%s' \"$HERDR_PLUGIN_CONTEXT_JSON\" > {}"]
+"#,
+                capture.display()
+            ),
+        );
+        link_manifest(&mut app, &root);
+
+        let invoke = app.handle_api_request(Request {
+            id: "invoke-scoped".into(),
+            method: Method::PluginActionInvoke(PluginActionInvokeParams {
+                plugin_id: None,
+                action_id: "example.scoped.status".into(),
+                context: Some(PluginInvocationContext {
+                    workspace_id: Some(named_workspace_id.clone()),
+                    invocation_source: Some("context_menu".into()),
+                    ..Default::default()
+                }),
+            }),
+        });
+        assert!(!invoke.contains("\"error\""), "unexpected: {invoke}");
+
+        let context: PluginInvocationContext =
+            serde_json::from_str(&read_capture_when_ready(&capture, || {
+                app.drain_all_internal_events();
+            }))
+            .unwrap();
+        assert_eq!(
+            context.workspace_id.as_deref(),
+            Some(named_workspace_id.as_str())
+        );
+        assert_ne!(
+            context.workspace_id.as_deref(),
+            Some(active_workspace_id.as_str())
+        );
+        assert_eq!(context.invocation_source.as_deref(), Some("context_menu"));
+
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(super::env::plugin_config_dir("example.scoped"));
+        let _ = std::fs::remove_dir_all(super::env::plugin_state_dir("example.scoped"));
+    }
+
+    /// A pane that moved workspaces since the caller read it still resolves, so
+    /// the ids the caller sent must not be pasted back over the workspace it
+    /// actually resolved to.
+    #[cfg(unix)]
+    #[test]
+    fn a_resolved_pane_outranks_the_workspace_id_the_caller_sent() {
+        let mut app = test_app();
+        app.state.workspaces = vec![
+            crate::workspace::Workspace::test_new("first"),
+            crate::workspace::Workspace::test_new("second"),
+        ];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+
+        let second_pane = app.state.workspaces[1]
+            .focused_pane_id()
+            .expect("focused pane");
+        let second_pane_id = app.public_pane_id(1, second_pane).expect("public pane id");
+        let first_workspace_id = app.public_workspace_id(0);
+        let second_workspace_id = app.public_workspace_id(1);
+
+        let context = app
+            .merge_plugin_context(
+                Some(PluginInvocationContext {
+                    // Stale: names workspace 0 while the pane lives in 1.
+                    workspace_id: Some(first_workspace_id.clone()),
+                    focused_pane_id: Some(second_pane_id.clone()),
+                    invocation_source: Some("context_menu".into()),
+                    ..Default::default()
+                }),
+                "test",
+            )
+            .expect("resolvable pane");
+
+        assert_eq!(
+            context.workspace_id.as_deref(),
+            Some(second_workspace_id.as_str()),
+            "the pane's real workspace must win over the id the caller sent"
+        );
+        assert_eq!(
+            context.focused_pane_id.as_deref(),
+            Some(second_pane_id.as_str())
+        );
+        assert_eq!(context.invocation_source.as_deref(), Some("context_menu"));
+    }
+
+    /// A pane that closed while the menu was open must fail loudly. Falling
+    /// through would ship the focused pane's context under the caller's id.
+    #[test]
+    fn an_invocation_naming_a_pane_that_is_gone_is_rejected() {
+        let mut app = test_app();
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("only")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+
+        let root = unique_temp_path("plugin-dead-pane");
+        write_manifest_content(&root, &menu_action_manifest("example.dead", "Status", ""));
+        link_manifest(&mut app, &root);
+
+        let invoke = app.handle_api_request(Request {
+            id: "invoke-dead".into(),
+            method: Method::PluginActionInvoke(PluginActionInvokeParams {
+                plugin_id: None,
+                action_id: "example.dead.status".into(),
+                context: Some(PluginInvocationContext {
+                    focused_pane_id: Some("p_9999999".into()),
+                    invocation_source: Some("context_menu".into()),
+                    ..Default::default()
+                }),
+            }),
+        });
+
+        assert!(
+            invoke.contains("stale_target"),
+            "a closed pane must not degrade to the focused one: {invoke}"
+        );
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

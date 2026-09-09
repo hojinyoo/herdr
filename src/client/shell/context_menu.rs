@@ -1,7 +1,24 @@
 use super::*;
 
 impl ClientContextMenuOverlay {
-    pub(super) fn items(&self) -> Vec<ClientContextMenuItem> {
+    pub(super) fn items(&self) -> Vec<ClientContextMenuItem<'_>> {
+        use ClientContextMenuAction as Action;
+
+        let mut items = self.builtin_items();
+        // Appended, so the default highlight is never a plugin action.
+        items.extend(
+            self.plugin_actions
+                .iter()
+                .enumerate()
+                .map(|(index, action)| ClientContextMenuItem {
+                    label: &action.title,
+                    action: Action::Plugin(index),
+                }),
+        );
+        items
+    }
+
+    fn builtin_items(&self) -> Vec<ClientContextMenuItem<'_>> {
         use ClientContextMenuAction as Action;
 
         let item = |label, action| ClientContextMenuItem { label, action };
@@ -82,6 +99,23 @@ impl ClientContextMenuOverlay {
 }
 
 impl ClientShellState {
+    fn snapshot_plugin_actions(
+        &self,
+        context: crate::protocol::ClientShellPluginActionContext,
+    ) -> Vec<crate::protocol::ClientShellPluginAction> {
+        self.snapshot
+            .as_deref()
+            .map(|snapshot| {
+                snapshot
+                    .plugin_actions
+                    .iter()
+                    .filter(|action| action.contexts.contains(&context))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     pub(super) fn open_workspace_context_menu(&mut self, workspace_id: String, x: u16, y: u16) {
         let Some(snapshot) = self.snapshot.as_deref() else {
             return;
@@ -121,6 +155,9 @@ impl ClientShellState {
             x,
             y,
             highlighted: 0,
+            plugin_actions: self.snapshot_plugin_actions(
+                crate::protocol::ClientShellPluginActionContext::Workspace,
+            ),
         }));
     }
 
@@ -140,6 +177,7 @@ impl ClientShellState {
             x,
             y,
             highlighted: 0,
+            plugin_actions: Vec::new(),
         }));
     }
 
@@ -165,14 +203,24 @@ impl ClientShellState {
             x,
             y,
             highlighted: 0,
+            plugin_actions: self
+                .snapshot_plugin_actions(crate::protocol::ClientShellPluginActionContext::Pane),
         }));
     }
 
     pub(super) fn move_context_menu_selection(&mut self, delta: isize) {
+        // A menu taller than the screen draws only what fits, and only a drawn
+        // entry has a hit rect. Plugin entries make that reachable, so keep the
+        // highlight inside the same set the mouse can reach: an entry runs
+        // without a confirmation step, and an undrawn one shows no highlight.
+        let drawn = self.hits.context_menu_rows.len();
         let Some(ClientShellOverlay::ContextMenu(menu)) = self.overlay.as_mut() else {
             return;
         };
-        let item_count = menu.items().len();
+        let mut item_count = menu.items().len();
+        if drawn > 0 {
+            item_count = item_count.min(drawn);
+        }
         if item_count == 0 {
             return;
         }
@@ -192,6 +240,11 @@ impl ClientShellState {
             outcome.repaint = true;
             return;
         };
+        if let ClientContextMenuAction::Plugin(index) = action {
+            self.invoke_context_menu_plugin_action(index, &menu, outcome);
+            outcome.repaint = true;
+            return;
+        }
         match menu.target {
             ClientContextMenuTarget::Workspace { workspace_id, .. } => {
                 self.activate_workspace_context_action(workspace_id, action, outcome)
@@ -216,6 +269,44 @@ impl ClientShellState {
             ),
         }
         outcome.repaint = true;
+    }
+
+    fn invoke_context_menu_plugin_action(
+        &mut self,
+        index: usize,
+        menu: &ClientContextMenuOverlay,
+        outcome: &mut ClientShellInput,
+    ) {
+        let Some(action) = menu.plugin_actions.get(index) else {
+            return;
+        };
+        let (workspace_id, pane_id) = match &menu.target {
+            ClientContextMenuTarget::Workspace { workspace_id, .. }
+            | ClientContextMenuTarget::Tab { workspace_id, .. } => (workspace_id.clone(), None),
+            ClientContextMenuTarget::Pane {
+                workspace_id,
+                pane_id,
+                ..
+            } => (workspace_id.clone(), Some(pane_id.clone())),
+        };
+        self.push_endpoint_method(
+            crate::api::schema::Method::PluginActionInvoke(
+                crate::api::schema::PluginActionInvokeParams {
+                    action_id: action.action_id.clone(),
+                    plugin_id: None,
+                    // Clicking an entry does not move Herdr's focus, so the
+                    // clicked target has to scope the invocation itself or the
+                    // endpoint fills the context from whatever is focused.
+                    context: Some(crate::api::schema::PluginInvocationContext {
+                        workspace_id: Some(workspace_id),
+                        focused_pane_id: pane_id,
+                        invocation_source: Some("context_menu".to_owned()),
+                        ..Default::default()
+                    }),
+                },
+            ),
+            outcome,
+        );
     }
 
     fn activate_workspace_context_action(

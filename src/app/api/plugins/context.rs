@@ -6,27 +6,77 @@ impl App {
         &self,
         provided: Option<PluginInvocationContext>,
         correlation_id: &str,
-    ) -> PluginInvocationContext {
-        let mut context = self.current_plugin_context(correlation_id);
+    ) -> Result<PluginInvocationContext, (&'static str, String)> {
+        let (mut context, scoped) = self.plugin_context_base(provided.as_ref(), correlation_id)?;
         if let Some(provided) = provided {
-            context.workspace_id = provided.workspace_id.or(context.workspace_id);
-            context.workspace_label = provided.workspace_label.or(context.workspace_label);
-            context.workspace_cwd = provided.workspace_cwd.or(context.workspace_cwd);
-            context.worktree = provided.worktree.or(context.worktree);
-            context.tab_id = provided.tab_id.or(context.tab_id);
-            context.tab_label = provided.tab_label.or(context.tab_label);
-            context.focused_pane_id = provided.focused_pane_id.or(context.focused_pane_id);
-            context.focused_pane_cwd = provided.focused_pane_cwd.or(context.focused_pane_cwd);
-            context.focused_pane_agent = provided.focused_pane_agent.or(context.focused_pane_agent);
-            context.focused_pane_status =
-                provided.focused_pane_status.or(context.focused_pane_status);
+            // The ids that named a target selected it; they must not also
+            // overwrite what it resolved to. A pane that moved workspaces since
+            // the caller read it would otherwise ship the caller's old
+            // workspace id beside the new workspace's cwd, tab and agent.
+            if !scoped {
+                context.workspace_id = provided.workspace_id.or(context.workspace_id);
+                context.workspace_label = provided.workspace_label.or(context.workspace_label);
+                context.workspace_cwd = provided.workspace_cwd.or(context.workspace_cwd);
+                context.worktree = provided.worktree.or(context.worktree);
+                context.tab_id = provided.tab_id.or(context.tab_id);
+                context.tab_label = provided.tab_label.or(context.tab_label);
+                context.focused_pane_id = provided.focused_pane_id.or(context.focused_pane_id);
+                context.focused_pane_cwd = provided.focused_pane_cwd.or(context.focused_pane_cwd);
+                context.focused_pane_agent =
+                    provided.focused_pane_agent.or(context.focused_pane_agent);
+                context.focused_pane_status =
+                    provided.focused_pane_status.or(context.focused_pane_status);
+            }
             context.selected_text = provided.selected_text.or(context.selected_text);
             context.invocation_source = provided.invocation_source.or(context.invocation_source);
             context.correlation_id = provided.correlation_id.or(context.correlation_id);
             context.clicked_url = provided.clicked_url.or(context.clicked_url);
             context.link_handler_id = provided.link_handler_id.or(context.link_handler_id);
         }
-        context
+        Ok(context)
+    }
+
+    /// A caller that names a workspace or pane means "act on that one". Basing
+    /// the rest on whatever is focused would hand the plugin another
+    /// workspace's cwd, tab and agent under the caller's own id, and a target
+    /// that is already gone would silently become the focused pane.
+    ///
+    /// The bool says whether a named target was resolved, which makes the
+    /// server's view of it authoritative over the ids the caller sent.
+    fn plugin_context_base(
+        &self,
+        provided: Option<&PluginInvocationContext>,
+        correlation_id: &str,
+    ) -> Result<(PluginInvocationContext, bool), (&'static str, String)> {
+        let Some(provided) = provided else {
+            return Ok((self.current_plugin_context(correlation_id), false));
+        };
+        if let Some(pane_id) = provided.focused_pane_id.as_deref() {
+            // parse_pane_id resolves only panes that still exist, and follows a
+            // pane that moved, so ws_idx is the pane's workspace now.
+            let Some((ws_idx, pane)) = self.parse_pane_id(pane_id) else {
+                return Err(("stale_target", format!("pane {pane_id} is no longer open")));
+            };
+            return Ok((
+                self.plugin_context_for_pane(ws_idx, pane, correlation_id),
+                true,
+            ));
+        }
+        if let Some(workspace_id) = provided.workspace_id.as_deref() {
+            // parse_workspace_id also accepts a bare index, which need not
+            // exist, so scope only on a workspace that is really there and
+            // otherwise leave the id the free-form tag it has always been.
+            if let Some(ws_idx) = self
+                .parse_workspace_id(workspace_id)
+                .filter(|ws_idx| self.state.workspaces.get(*ws_idx).is_some())
+            {
+                return Ok((
+                    self.plugin_context_for_workspace(ws_idx, correlation_id),
+                    true,
+                ));
+            }
+        }
+        Ok((self.current_plugin_context(correlation_id), false))
     }
 
     pub(super) fn current_plugin_context(&self, correlation_id: &str) -> PluginInvocationContext {
@@ -326,7 +376,9 @@ impl App {
         pane_id: crate::layout::PaneId,
         correlation_id: &str,
     ) -> PluginInvocationContext {
-        let ws = &self.state.workspaces[ws_idx];
+        let Some(ws) = self.state.workspaces.get(ws_idx) else {
+            return empty_plugin_context(correlation_id);
+        };
         let workspace = self.workspace_info(ws_idx);
         let tab_idx = ws
             .find_tab_index_for_pane(pane_id)
