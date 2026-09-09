@@ -67,6 +67,7 @@ fn test_headless_server_with_event_hub(event_hub: api::EventHub) -> HeadlessServ
         #[cfg(unix)]
         next_client_id: 1,
         foreground_client_id: None,
+        file_transfer: None,
         tab_geometry_controllers: HashMap::new(),
         popup_owner_tab_id: None,
         client_shell_boot_id: "test-boot".into(),
@@ -6305,4 +6306,367 @@ fn no_handle_internal_event_bypass_in_module() {
              handle_internal_event_with_forwarding (bypass risk):\n  {}",
         bypass_lines.join("\n  ")
     );
+}
+
+// ---- native file transfer: the slot must always come back ----
+
+/// `tag` must be unique per test: these run in the same process, and a shared
+/// directory would let one test's cleanup delete another's destination
+/// mid-write.
+fn file_transfer_test_server(
+    tag: &str,
+) -> (HeadlessServer, std::sync::mpsc::Receiver<Vec<u8>>, PathBuf) {
+    let (server, control_rx) = window_title_test_server();
+    let dir = std::env::temp_dir().join(format!("herdr-ft-{}-{tag}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("transfer dir");
+    (server, control_rx, dir)
+}
+
+fn next_file_transfer_control(
+    control_rx: &std::sync::mpsc::Receiver<Vec<u8>>,
+) -> Option<crate::protocol::file_transfer::ServerFileTransferControl> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
+        let Ok(bytes) = control_rx.recv_timeout(remaining) else {
+            return None;
+        };
+        if let ServerMessage::EndpointControl { kind, data } = read_server_message(bytes) {
+            if kind == crate::protocol::file_transfer::SERVER_FILE_TRANSFER_KIND {
+                return Some(serde_json::from_str(&data).expect("decode transfer control"));
+            }
+        }
+    }
+    None
+}
+
+fn client_transfer(
+    server: &mut HeadlessServer,
+    control: crate::protocol::file_transfer::ClientFileTransferControl,
+) {
+    server.handle_client_file_transfer_control(1, control);
+}
+
+#[test]
+fn an_upload_completing_normally_releases_the_slot() {
+    use crate::protocol::file_transfer::{encode_chunk, ClientFileTransferControl as Control};
+
+    let (mut server, control_rx, dir) = file_transfer_test_server("complete");
+    server.begin_upload_for_test(1, 7, &dir, "a.txt", 4);
+    client_transfer(
+        &mut server,
+        Control::Chunk {
+            transfer_id: 7,
+            seq: 0,
+            data: encode_chunk(b"abcd"),
+        },
+    );
+
+    assert!(server.file_transfer_slot_is_free());
+    assert_eq!(fs::read(dir.join("a.txt")).expect("written"), b"abcd");
+    drop(next_file_transfer_control(&control_rx));
+    let _ = fs::remove_dir_all(&dir);
+    shutdown_test_runtimes(&mut server);
+}
+
+#[test]
+fn an_upload_claiming_success_before_the_bytes_arrive_is_refused() {
+    use crate::protocol::file_transfer::{
+        ClientFileTransferControl as Control, ServerFileTransferControl as Reply,
+    };
+
+    let (mut server, control_rx, dir) = file_transfer_test_server("early-success");
+    server.begin_upload_for_test(1, 7, &dir, "a.txt", 1024);
+
+    // Peer announces 1 KiB, sends nothing, then claims success. Leaving the
+    // slot held would refuse every later transfer for the session.
+    client_transfer(
+        &mut server,
+        Control::End {
+            transfer_id: 7,
+            ok: true,
+            error: None,
+        },
+    );
+
+    assert!(server.file_transfer_slot_is_free());
+    assert!(
+        !dir.join("a.txt").exists(),
+        "the partial destination should be unlinked"
+    );
+    assert!(matches!(
+        next_file_transfer_control(&control_rx),
+        Some(Reply::End { ok: false, .. })
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    shutdown_test_runtimes(&mut server);
+}
+
+#[test]
+fn an_out_of_order_upload_chunk_releases_the_slot() {
+    use crate::protocol::file_transfer::{
+        encode_chunk, ClientFileTransferControl as Control, ServerFileTransferControl as Reply,
+    };
+
+    let (mut server, control_rx, dir) = file_transfer_test_server("desync");
+    server.begin_upload_for_test(1, 7, &dir, "a.txt", 4);
+    client_transfer(
+        &mut server,
+        Control::Chunk {
+            transfer_id: 7,
+            seq: 1,
+            data: encode_chunk(b"abcd"),
+        },
+    );
+
+    assert!(server.file_transfer_slot_is_free());
+    assert!(!dir.join("a.txt").exists());
+    assert!(matches!(
+        next_file_transfer_control(&control_rx),
+        Some(Reply::End { ok: false, .. })
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    shutdown_test_runtimes(&mut server);
+}
+
+#[test]
+fn a_second_transfer_is_refused_rather_than_interleaved() {
+    use crate::protocol::file_transfer::{
+        ClientFileTransferControl as Control, ServerFileTransferControl as Reply,
+    };
+
+    let (mut server, control_rx, dir) = file_transfer_test_server("busy");
+    server.begin_upload_for_test(1, 7, &dir, "a.txt", 4);
+    client_transfer(
+        &mut server,
+        Control::Start {
+            transfer_id: 8,
+            name: "b.txt".into(),
+            size: 4,
+        },
+    );
+
+    assert!(
+        !server.file_transfer_slot_is_free(),
+        "the first still owns it"
+    );
+    assert!(matches!(
+        next_file_transfer_control(&control_rx),
+        Some(Reply::End {
+            transfer_id: 8,
+            ok: false,
+            ..
+        })
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    shutdown_test_runtimes(&mut server);
+}
+
+#[test]
+fn a_stalled_transfer_is_reclaimed() {
+    let (mut server, _control_rx, dir) = file_transfer_test_server("stall");
+    server.begin_upload_for_test(1, 7, &dir, "a.txt", 1024);
+    server.expire_file_transfer_for_test();
+    server.expire_stalled_file_transfer(Instant::now());
+
+    assert!(server.file_transfer_slot_is_free());
+    assert!(!dir.join("a.txt").exists());
+    let _ = fs::remove_dir_all(&dir);
+    shutdown_test_runtimes(&mut server);
+}
+
+#[test]
+fn a_download_ack_refreshes_the_stall_deadline() {
+    use crate::protocol::file_transfer::{
+        ClientFileTransferControl as Control, ServerFileTransferControl as Reply,
+    };
+
+    let (mut server, control_rx, dir) = file_transfer_test_server("ack-refresh");
+    let source = dir.join("big.bin");
+    fs::write(
+        &source,
+        vec![7u8; crate::protocol::file_transfer::FILE_TRANSFER_CHUNK_SIZE * 2],
+    )
+    .expect("write source");
+    server.begin_download_for_test(1, 9, &source);
+
+    let Some(Reply::Chunk { seq, .. }) = next_file_transfer_control(&control_rx) else {
+        panic!("the first download chunk should be on the wire");
+    };
+    // A download's only inbound traffic is acks, so without the refresh a
+    // healthy transfer is abandoned mid-stream.
+    server.expire_file_transfer_for_test();
+    client_transfer(
+        &mut server,
+        Control::Ack {
+            transfer_id: 9,
+            seq,
+        },
+    );
+    server.expire_stalled_file_transfer(Instant::now());
+
+    assert!(!server.file_transfer_slot_is_free());
+    let _ = fs::remove_dir_all(&dir);
+    shutdown_test_runtimes(&mut server);
+}
+
+#[test]
+fn a_disconnecting_client_releases_the_slot() {
+    let (mut server, _control_rx, dir) = file_transfer_test_server("disconnect");
+    server.begin_upload_for_test(1, 7, &dir, "a.txt", 1024);
+    server.remove_client(1);
+
+    assert!(server.file_transfer_slot_is_free());
+    assert!(!dir.join("a.txt").exists());
+    let _ = fs::remove_dir_all(&dir);
+    shutdown_test_runtimes(&mut server);
+}
+
+#[test]
+fn listing_an_unreadable_directory_reports_why_instead_of_looking_empty() {
+    use crate::protocol::file_transfer::{
+        ClientFileTransferControl as Control, ServerFileTransferControl as Reply,
+    };
+
+    let (mut server, control_rx, dir) = file_transfer_test_server("listing");
+    client_transfer(
+        &mut server,
+        Control::List {
+            path: Some(dir.join("missing").to_string_lossy().into_owned()),
+            child: None,
+            show_hidden: false,
+        },
+    );
+
+    assert!(matches!(
+        next_file_transfer_control(&control_rx),
+        Some(Reply::Listing { error: Some(_), .. })
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    shutdown_test_runtimes(&mut server);
+}
+
+#[test]
+fn a_stale_download_ack_does_not_refresh_the_stall_deadline() {
+    use crate::protocol::file_transfer::{
+        ClientFileTransferControl as Control, ServerFileTransferControl as Reply,
+    };
+
+    let (mut server, control_rx, dir) = file_transfer_test_server("stale-ack");
+    let source = dir.join("big.bin");
+    fs::write(
+        &source,
+        vec![7u8; crate::protocol::file_transfer::FILE_TRANSFER_CHUNK_SIZE * 2],
+    )
+    .expect("write source");
+    server.begin_download_for_test(1, 9, &source);
+    let Some(Reply::Chunk { seq, .. }) = next_file_transfer_control(&control_rx) else {
+        panic!("the first download chunk should be on the wire");
+    };
+    client_transfer(
+        &mut server,
+        Control::Ack {
+            transfer_id: 9,
+            seq,
+        },
+    );
+
+    // Repeating an ack the server already consumed releases nothing, so it is
+    // not progress. Counting it would let a peer hold the one slot forever by
+    // acking a stale sequence just inside the deadline.
+    server.expire_file_transfer_for_test();
+    client_transfer(
+        &mut server,
+        Control::Ack {
+            transfer_id: 9,
+            seq,
+        },
+    );
+    server.expire_stalled_file_transfer(Instant::now());
+
+    assert!(server.file_transfer_slot_is_free());
+    let _ = fs::remove_dir_all(&dir);
+    shutdown_test_runtimes(&mut server);
+}
+
+#[test]
+fn an_upload_ack_that_writes_nothing_does_not_refresh_the_stall_deadline() {
+    let (mut server, _control_rx, dir) = file_transfer_test_server("stale-upload");
+    server.begin_upload_for_test(1, 7, &dir, "a.txt", 1024);
+
+    // An announced upload that sends no chunks makes no progress, whatever else
+    // the peer says.
+    server.expire_file_transfer_for_test();
+    server.handle_client_file_transfer_control(
+        1,
+        crate::protocol::file_transfer::ClientFileTransferControl::Ack {
+            transfer_id: 7,
+            seq: 0,
+        },
+    );
+    server.expire_stalled_file_transfer(Instant::now());
+
+    assert!(server.file_transfer_slot_is_free());
+    assert!(!dir.join("a.txt").exists());
+    let _ = fs::remove_dir_all(&dir);
+    shutdown_test_runtimes(&mut server);
+}
+
+#[test]
+fn a_listing_reports_the_parent_the_client_cannot_compute() {
+    use crate::protocol::file_transfer::{
+        ClientFileTransferControl as Control, ServerFileTransferControl as Reply,
+    };
+
+    let (mut server, control_rx, dir) = file_transfer_test_server("listing-parent");
+    fs::create_dir_all(dir.join("logs")).expect("child dir");
+    client_transfer(
+        &mut server,
+        Control::List {
+            path: Some(dir.to_string_lossy().into_owned()),
+            child: Some("logs".to_owned()),
+            show_hidden: false,
+        },
+    );
+
+    // The client sends the directory and the entry separately, and the server
+    // does the joining, because the two machines need not share path syntax.
+    let Some(Reply::Listing {
+        dir: listed,
+        parent,
+        error,
+        ..
+    }) = next_file_transfer_control(&control_rx)
+    else {
+        panic!("a listing should come back");
+    };
+    assert_eq!(error, None);
+    assert_eq!(listed, dir.join("logs").to_string_lossy());
+    assert_eq!(parent.as_deref(), Some(&*dir.to_string_lossy()));
+    let _ = fs::remove_dir_all(&dir);
+    shutdown_test_runtimes(&mut server);
+}
+
+#[test]
+fn a_listing_child_that_is_not_a_plain_name_is_refused() {
+    use crate::protocol::file_transfer::{
+        ClientFileTransferControl as Control, ServerFileTransferControl as Reply,
+    };
+
+    let (mut server, control_rx, dir) = file_transfer_test_server("listing-escape");
+    client_transfer(
+        &mut server,
+        Control::List {
+            path: Some(dir.to_string_lossy().into_owned()),
+            child: Some("../..".to_owned()),
+            show_hidden: false,
+        },
+    );
+
+    assert!(matches!(
+        next_file_transfer_control(&control_rx),
+        Some(Reply::Listing { error: Some(_), .. })
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    shutdown_test_runtimes(&mut server);
 }
