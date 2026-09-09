@@ -41,7 +41,17 @@ env:
   RUST_TOOLCHAIN_VERSION: 1.96.1
 
 jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    outputs:
+      build_id: ${{ steps.plan.outputs.build_id }}
+    steps:
+      - name: Derive fork build id
+        id: plan
+        run: echo "build_id=${GITHUB_SHA:0:8}" >> "$GITHUB_OUTPUT"
+
   build-linux:
+    needs: preflight
     if: ${{ inputs.build_group == 'linux' || inputs.build_group == 'all' }}
     runs-on: ${{ matrix.os }}
     strategy:
@@ -57,6 +67,8 @@ jobs:
     env:
       LIBGHOSTTY_VT_OPTIMIZE: ${{ inputs.libghostty_optimize }}
       LIBGHOSTTY_VT_SIMD: ${{ inputs.libghostty_simd }}
+      HERDR_BUILD_CHANNEL: fork
+      HERDR_BUILD_ID: ${{ needs.preflight.outputs.build_id }}
 
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
@@ -126,6 +138,7 @@ jobs:
           retention-days: 7
 
   build-macos:
+    needs: preflight
     if: ${{ inputs.build_group == 'macos' || inputs.build_group == 'all' }}
     runs-on: ${{ matrix.os }}
     strategy:
@@ -146,6 +159,8 @@ jobs:
       # "not 8-byte aligned". release.yml builds every platform with SIMD on, so
       # take its value here rather than the dispatch input.
       LIBGHOSTTY_VT_SIMD: 'true'
+      HERDR_BUILD_CHANNEL: fork
+      HERDR_BUILD_ID: ${{ needs.preflight.outputs.build_id }}
 
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
@@ -198,11 +213,14 @@ jobs:
           retention-days: 7
 
   build-windows:
+    needs: preflight
     if: ${{ inputs.build_group == 'windows' || inputs.build_group == 'all' }}
     runs-on: windows-latest
     env:
       LIBGHOSTTY_VT_OPTIMIZE: ${{ inputs.libghostty_optimize }}
       LIBGHOSTTY_VT_SIMD: ${{ inputs.libghostty_simd }}
+      HERDR_BUILD_CHANNEL: fork
+      HERDR_BUILD_ID: ${{ needs.preflight.outputs.build_id }}
 
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
