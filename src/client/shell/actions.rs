@@ -337,6 +337,83 @@ impl ClientShellState {
         self.push_endpoint_method_with_kind(method, PendingEndpointKind::Generic, outcome);
     }
 
+    fn any_agent_needs_attention(&self) -> bool {
+        self.snapshot.as_deref().is_some_and(|snapshot| {
+            snapshot
+                .agents
+                .iter()
+                .any(|agent| crate::api::schema::ATTN_STATUSES.contains(&agent.agent_status))
+        })
+    }
+
+    /// Cycle the agent panel control: grouped, priority, attn, back to grouped.
+    ///
+    /// attn is skipped when nothing matches it. The collapsed sidebar draws neither the view label
+    /// nor the `no matching agents` text, so a filtered-empty panel and a dead Herdr look identical.
+    ///
+    /// The sort is client-local chrome; the view is runtime state, so entering and leaving attn goes
+    /// through the server.
+    pub(super) fn cycle_agent_panel_control(&mut self, outcome: &mut ClientShellInput) {
+        self.agent_scroll = 0;
+        outcome.repaint = true;
+
+        let active_view = self
+            .snapshot
+            .as_deref()
+            .and_then(|snapshot| snapshot.agent_view_label.as_deref());
+        // The label is the whole test. A caller's view that happens to share it is still safe: the
+        // clear names our source, and the server only clears a view whose source matches.
+        let ours = active_view == Some(crate::api::schema::ATTN_VIEW_LABEL);
+        if active_view.is_some() && !ours {
+            return;
+        }
+
+        if ours {
+            self.set_agent_panel_sort(crate::config::AgentPanelSortConfig::Spaces, outcome);
+            self.push_endpoint_method(
+                crate::api::schema::Method::AgentViewClear(
+                    crate::api::schema::AgentViewClearParams {
+                        source: Some(crate::api::schema::ATTN_VIEW_SOURCE.to_string()),
+                    },
+                ),
+                outcome,
+            );
+            return;
+        }
+
+        if self.config.agent_panel_sort == crate::config::AgentPanelSortConfig::Priority
+            && self.any_agent_needs_attention()
+        {
+            self.push_endpoint_method(
+                crate::api::schema::Method::AgentViewSet(crate::api::schema::attn_view()),
+                outcome,
+            );
+            return;
+        }
+
+        self.set_agent_panel_sort(
+            match self.config.agent_panel_sort {
+                crate::config::AgentPanelSortConfig::Spaces => {
+                    crate::config::AgentPanelSortConfig::Priority
+                }
+                crate::config::AgentPanelSortConfig::Priority => {
+                    crate::config::AgentPanelSortConfig::Spaces
+                }
+            },
+            outcome,
+        );
+    }
+
+    fn set_agent_panel_sort(
+        &mut self,
+        sort: crate::config::AgentPanelSortConfig,
+        outcome: &mut ClientShellInput,
+    ) {
+        self.config.agent_panel_sort = sort;
+        self.agent_panel_sort_manual = true;
+        self.persist_chrome_preferences(outcome);
+    }
+
     fn push_endpoint_notice(
         &mut self,
         kind: ClientEndpointNoticeKind,

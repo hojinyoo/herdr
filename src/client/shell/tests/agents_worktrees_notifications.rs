@@ -735,6 +735,131 @@ fn agent_sort_toggle_is_client_local_and_persists_per_endpoint() {
     std::fs::remove_file(path).expect("remove agent sort preferences");
 }
 
+fn agent_with_status(agent_status: AgentStatus) -> ClientShellAgent {
+    ClientShellAgent {
+        pane_id: "pane_1".into(),
+        workspace_id: "ws_1".into(),
+        tab_id: "tab_1".into(),
+        name: Some("pi".into()),
+        display_agent: None,
+        agent: Some("pi".into()),
+        title: None,
+        terminal_title: None,
+        terminal_title_stripped: None,
+        agent_status,
+        state_change_seq: 1,
+        state_labels: Vec::new(),
+        tokens: Vec::new(),
+        focused: true,
+    }
+}
+
+fn click_agent_sort_toggle(state: &mut ClientShellState) -> ClientShellInput {
+    let toggle = state.hits.agent_sort_toggle;
+    let outcome =
+        state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: toggle.x,
+            row: toggle.y,
+            modifiers: KeyModifiers::empty(),
+        })]);
+    state.compose(106, 30).expect("agent sidebar frame");
+    outcome
+}
+
+#[test]
+fn agent_panel_control_reaches_attn_and_skips_it_when_nothing_needs_attention() {
+    let mut projected = snapshot();
+    projected
+        .agents
+        .push(agent_with_status(AgentStatus::Working));
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(projected));
+    state.set_pane_surface(surface());
+    state.compose(106, 30).expect("agent sidebar frame");
+
+    // Working is not an attention state, so attn would draw an empty panel. Skip it.
+    click_agent_sort_toggle(&mut state);
+    assert_eq!(
+        state.config.agent_panel_sort,
+        crate::config::AgentPanelSortConfig::Priority
+    );
+    let skipped = click_agent_sort_toggle(&mut state);
+    assert_eq!(
+        state.config.agent_panel_sort,
+        crate::config::AgentPanelSortConfig::Spaces
+    );
+    assert!(skipped.actions.is_empty());
+
+    // One blocked agent, and attn earns its place. The view is runtime state, so it is requested.
+    let mut projected = snapshot();
+    projected
+        .agents
+        .push(agent_with_status(AgentStatus::Blocked));
+    state.set_snapshot(Box::new(projected));
+    state.compose(106, 30).expect("agent sidebar frame");
+    click_agent_sort_toggle(&mut state);
+    let entered = click_agent_sort_toggle(&mut state);
+    let [ClientShellAction::Endpoint { request, .. }] = &entered.actions[..] else {
+        panic!("entering attn should install the view through the endpoint API");
+    };
+    assert!(matches!(
+        &request.method,
+        crate::api::schema::Method::AgentViewSet(params)
+            if params.source == crate::api::schema::ATTN_VIEW_SOURCE
+    ));
+}
+
+#[test]
+fn agent_panel_control_leaves_attn_by_clearing_the_view_it_owns() {
+    let mut projected = snapshot();
+    projected
+        .agents
+        .push(agent_with_status(AgentStatus::Blocked));
+    projected.agent_view_label = Some(crate::api::schema::ATTN_VIEW_LABEL.into());
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(projected));
+    state.set_pane_surface(surface());
+    state.compose(106, 30).expect("agent sidebar frame");
+
+    // Ownership is read from the snapshot, so a client that never asked for the view can still
+    // leave it. That is the state a reattached client lands in.
+    let left = click_agent_sort_toggle(&mut state);
+    let [ClientShellAction::Endpoint { request, .. }] = &left.actions[..] else {
+        panic!("leaving attn should clear the view through the endpoint API");
+    };
+    assert!(matches!(
+        &request.method,
+        crate::api::schema::Method::AgentViewClear(params)
+            if params.source.as_deref() == Some(crate::api::schema::ATTN_VIEW_SOURCE)
+    ));
+    assert_eq!(
+        state.config.agent_panel_sort,
+        crate::config::AgentPanelSortConfig::Spaces
+    );
+}
+
+#[test]
+fn agent_panel_control_does_not_clear_a_view_it_does_not_own() {
+    let mut projected = snapshot();
+    projected
+        .agents
+        .push(agent_with_status(AgentStatus::Blocked));
+    projected.agent_view_label = Some("theirs".into());
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(projected));
+    state.set_pane_surface(surface());
+    state.compose(106, 30).expect("agent sidebar frame");
+
+    // The control is not even offered while a caller's view is active.
+    assert_eq!(state.hits.agent_sort_toggle, Rect::default());
+
+    let sort_before = state.config.agent_panel_sort;
+    let mut outcome = ClientShellInput::default();
+    state.cycle_agent_panel_control(&mut outcome);
+    assert_eq!(state.config.agent_panel_sort, sort_before);
+}
+
 #[test]
 fn workspace_actions_preserve_selected_target_and_client_confirmation() {
     let mut snapshot = snapshot();

@@ -129,7 +129,10 @@ pub(super) fn render_agent_panel_header(
         sort_width,
         1,
     );
-    hits.agent_sort_toggle = if config.mouse_capture && agent_view_label.is_none() {
+    // Our own attn view is a position in the cycle; a caller's view is not ours to offer to clear.
+    let cycle_owns_label =
+        agent_view_label.is_none_or(|label| label == crate::api::schema::ATTN_VIEW_LABEL);
+    hits.agent_sort_toggle = if config.mouse_capture && cycle_owns_label {
         sort_rect
     } else {
         Rect::default()
