@@ -50,6 +50,46 @@ pub(crate) fn validate_agent_view_source(source: &str) -> Result<String, String>
     normalize_source(source)
 }
 
+/// Source of the built-in "attn" view: the workers that need a human.
+///
+/// The source is what separates our own view from a caller's. The panel control may cycle out of
+/// this one; a view installed by anyone else is theirs and a click must not clear it.
+pub(crate) const ATTN_VIEW_SOURCE: &str = "ui.agent_panel";
+
+fn attn_filter() -> AgentViewFilter {
+    AgentViewFilter::In {
+        field: AgentViewField::Builtin(AgentViewBuiltinField::Status),
+        values: vec![
+            AgentViewValue::String("blocked".to_string()),
+            AgentViewValue::String("done".to_string()),
+        ],
+    }
+}
+
+pub(crate) fn attn_view() -> AgentViewSetParams {
+    AgentViewSetParams {
+        source: ATTN_VIEW_SOURCE.to_string(),
+        label: Some("attn".to_string()),
+        filter: Some(attn_filter()),
+        sort: Vec::new(),
+    }
+}
+
+pub(crate) fn is_attn_view(spec: &AgentViewSetParams) -> bool {
+    spec.source == ATTN_VIEW_SOURCE
+}
+
+/// Whether installing the attn view would show anything.
+///
+/// Asked through the view's own filter rather than a hand-written status test, so the preset and
+/// the guard cannot drift apart. Entries are collected before any active override is applied.
+pub(crate) fn attn_view_has_matches(app: &AppState) -> bool {
+    let filter = attn_filter();
+    crate::ui::all_agent_panel_entries(app)
+        .iter()
+        .any(|entry| matches_filter(app, entry, &filter))
+}
+
 pub(crate) fn apply_agent_view(app: &AppState, entries: &mut Vec<AgentPanelEntry>) {
     if let Some(spec) = app.agent_view_override.as_ref() {
         if let Some(filter) = &spec.filter {

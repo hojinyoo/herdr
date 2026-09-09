@@ -85,11 +85,13 @@ fn agent_panel_sort_label(sort: AgentPanelSort) -> &'static str {
     }
 }
 
-pub(crate) fn agent_panel_toggle_rect(area: Rect, sort: AgentPanelSort) -> Rect {
-    agent_panel_header_label_rect(area, agent_panel_sort_label(sort))
+/// The text drawn on the agent panel's control, and the thing its click rect is measured from.
+/// An active view override names itself; otherwise the control names the sort.
+pub(crate) fn agent_panel_control_label(app: &AppState) -> &str {
+    active_agent_view_label(app).unwrap_or_else(|| agent_panel_sort_label(app.agent_panel_sort))
 }
 
-fn agent_panel_header_label_rect(area: Rect, label: &str) -> Rect {
+pub(crate) fn agent_panel_header_label_rect(area: Rect, label: &str) -> Rect {
     if area.width == 0 || area.height < 2 {
         return Rect::default();
     }
@@ -1454,8 +1456,7 @@ fn render_agent_detail(
         )])),
         Rect::new(area.x, area.y + 1, area.width, 1),
     );
-    let control_label = active_agent_view_label(app)
-        .unwrap_or_else(|| agent_panel_sort_label(app.agent_panel_sort));
+    let control_label = agent_panel_control_label(app);
     let toggle_rect = agent_panel_header_label_rect(area, control_label);
     if toggle_rect != Rect::default() {
         let color = if app.agent_view_override.is_some() {

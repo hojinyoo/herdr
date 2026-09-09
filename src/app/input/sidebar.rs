@@ -465,8 +465,44 @@ impl AppState {
         })
     }
 
+    /// Cycle the agent panel control: grouped, priority, attn, back to grouped.
+    ///
+    /// attn is skipped when nothing matches it. Installing a view that would draw an empty list is
+    /// the one state worth avoiding: expanded, the panel says `no matching agents`, but the
+    /// collapsed sidebar draws neither that text nor the view label, so a filtered-empty panel and
+    /// a dead Herdr are indistinguishable.
+    pub(super) fn cycle_agent_panel_control(&mut self) {
+        use crate::app::state::AgentPanelSort;
+
+        // Ours is a position in the cycle. Anyone else's view is theirs, and stops the cycle here.
+        if let Some(view) = &self.agent_view_override {
+            if crate::app::agent_view::is_attn_view(view) {
+                self.agent_view_override = None;
+                self.agent_panel_sort = AgentPanelSort::Spaces;
+            }
+            return;
+        }
+
+        match self.agent_panel_sort {
+            AgentPanelSort::Spaces => self.agent_panel_sort = AgentPanelSort::Priority,
+            AgentPanelSort::Priority => {
+                if crate::app::agent_view::attn_view_has_matches(self) {
+                    self.agent_view_override = Some(crate::app::agent_view::attn_view());
+                } else {
+                    self.agent_panel_sort = AgentPanelSort::Spaces;
+                }
+            }
+        }
+    }
+
     pub(super) fn on_agent_panel_sort_toggle(&self, col: u16, row: u16) -> bool {
-        if self.sidebar_collapsed || self.agent_view_override.is_some() {
+        // Our own attn view is a position in the control's cycle, so the click stays live on it.
+        // Any other override belongs to its installer and the control must not clear it.
+        let clearable = self
+            .agent_view_override
+            .as_ref()
+            .is_none_or(crate::app::agent_view::is_attn_view);
+        if self.sidebar_collapsed || !clearable {
             return false;
         }
 
@@ -474,7 +510,10 @@ impl AppState {
             self.view.sidebar_rect,
             self.sidebar_section_split,
         );
-        let rect = crate::ui::agent_panel_toggle_rect(detail_area, self.agent_panel_sort);
+        let rect = crate::ui::agent_panel_header_label_rect(
+            detail_area,
+            crate::ui::agent_panel_control_label(self),
+        );
         rect.width > 0
             && col >= rect.x
             && col < rect.x + rect.width
@@ -856,7 +895,10 @@ mod tests {
             app.state.view.sidebar_rect,
             app.state.sidebar_section_split,
         );
-        let toggle = crate::ui::agent_panel_toggle_rect(detail_area, app.state.agent_panel_sort);
+        let toggle = crate::ui::agent_panel_header_label_rect(
+            detail_area,
+            crate::ui::agent_panel_control_label(&app.state),
+        );
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
             toggle.x,
@@ -865,6 +907,79 @@ mod tests {
 
         assert_eq!(app.state.agent_panel_sort, AgentPanelSort::Priority);
         assert_eq!(app.state.agent_panel_scroll, 0);
+    }
+
+    #[test]
+    fn agent_panel_control_cycles_through_attn_and_skips_it_when_empty() {
+        let mut app = app_for_mouse_test();
+        let workspace = Workspace::test_new("test");
+        let pane = workspace.tabs[0].root_pane;
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+
+        // Nothing is blocked or done, so attn would draw an empty panel. Skip it.
+        app.state.cycle_agent_panel_control();
+        assert_eq!(app.state.agent_panel_sort, AgentPanelSort::Priority);
+        app.state.cycle_agent_panel_control();
+        assert_eq!(app.state.agent_panel_sort, AgentPanelSort::Spaces);
+        assert!(app.state.agent_view_override.is_none());
+
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.detected_agent = Some(Agent::Claude);
+        terminal.state = AgentState::Blocked;
+
+        // One blocked agent, so attn now earns its place in the cycle.
+        app.state.cycle_agent_panel_control();
+        assert_eq!(app.state.agent_panel_sort, AgentPanelSort::Priority);
+        app.state.cycle_agent_panel_control();
+        let view = app
+            .state
+            .agent_view_override
+            .as_ref()
+            .expect("attn view installed");
+        assert!(crate::app::agent_view::is_attn_view(view));
+        assert_eq!(crate::ui::agent_panel_control_label(&app.state), "attn");
+
+        app.state.cycle_agent_panel_control();
+        assert!(app.state.agent_view_override.is_none());
+        assert_eq!(app.state.agent_panel_sort, AgentPanelSort::Spaces);
+    }
+
+    #[test]
+    fn agent_panel_control_leaves_a_view_it_does_not_own_alone() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("test")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+
+        let foreign = crate::api::schema::AgentViewSetParams {
+            source: "example.views".to_string(),
+            label: Some("theirs".to_string()),
+            filter: None,
+            sort: Vec::new(),
+        };
+        app.state.agent_view_override = Some(foreign.clone());
+
+        let (_, detail_area) = crate::ui::expanded_sidebar_sections(
+            app.state.view.sidebar_rect,
+            app.state.sidebar_section_split,
+        );
+        let toggle = crate::ui::agent_panel_header_label_rect(
+            detail_area,
+            crate::ui::agent_panel_control_label(&app.state),
+        );
+        assert!(!app.state.on_agent_panel_sort_toggle(toggle.x, toggle.y));
+
+        app.state.cycle_agent_panel_control();
+        assert_eq!(app.state.agent_view_override, Some(foreign));
+        assert_eq!(app.state.agent_panel_sort, AgentPanelSort::Spaces);
     }
 
     #[test]
