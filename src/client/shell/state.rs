@@ -581,6 +581,8 @@ pub(super) enum ClientContextMenuAction {
     Zoom,
     ToggleRightClickPassthrough,
     ClosePane,
+    /// Index into the overlay's frozen `plugin_actions`.
+    Plugin(usize),
 }
 
 #[derive(Debug)]
@@ -611,10 +613,14 @@ pub(super) struct ClientContextMenuOverlay {
     pub(super) x: u16,
     pub(super) y: u16,
     pub(super) highlighted: usize,
+    /// Frozen when the menu opens: a menu entry runs without a confirmation
+    /// step, so a snapshot arriving while the menu is up must not move an
+    /// entry out from under the pointer.
+    pub(super) plugin_actions: Vec<crate::protocol::ClientShellPluginAction>,
 }
 
-pub(super) struct ClientContextMenuItem {
-    pub(super) label: &'static str,
+pub(super) struct ClientContextMenuItem<'a> {
+    pub(super) label: &'a str,
     pub(super) action: ClientContextMenuAction,
 }
 

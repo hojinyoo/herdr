@@ -184,6 +184,7 @@ mod tests {
             panes: Vec::new(),
             agents: Vec::new(),
             commands: Vec::new(),
+            plugin_actions: Vec::new(),
         }
     }
 
