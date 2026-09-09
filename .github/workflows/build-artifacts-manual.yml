@@ -140,7 +140,12 @@ jobs:
             name: herdr-macos-aarch64
     env:
       LIBGHOSTTY_VT_OPTIMIZE: ${{ inputs.libghostty_optimize }}
-      LIBGHOSTTY_VT_SIMD: ${{ inputs.libghostty_simd }}
+      # Zig 0.15.2 aligns mach-o archive members to 4 bytes and Apple's ld
+      # requires 8. Whether that trips depends on member sizes: -Dsimd=false
+      # lands compiler_rt.o at 4 mod 8 in libghostty-vt.a and the link dies with
+      # "not 8-byte aligned". release.yml builds every platform with SIMD on, so
+      # take its value here rather than the dispatch input.
+      LIBGHOSTTY_VT_SIMD: 'true'
 
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
@@ -153,13 +158,17 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN_VERSION }}
           targets: ${{ matrix.target }}
 
-      - name: Install Zig
-        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
-        with:
-          version: 0.15.2
+      # Upstream Zig 0.15.2 cannot link libghostty-vt against the macOS SDK here
+      # (undefined _abort, _free, __availability_version_check ...). release.yml
+      # uses the patched Homebrew formula on macOS for the same reason.
+      - name: Install patched Zig on macOS
+        run: |
+          HOMEBREW_NO_AUTO_UPDATE=1 brew install zig@0.15
+          echo "$(brew --prefix zig@0.15)/bin" >> "$GITHUB_PATH"
+          "$(brew --prefix zig@0.15)/bin/zig" version
 
       - name: Install macOS build tools
-        run: brew install cmake ninja
+        run: HOMEBREW_NO_AUTO_UPDATE=1 brew install cmake ninja
 
       - name: Remove Zig caches
         run: rm -rf .zig-cache vendor/libghostty-vt/.zig-cache vendor/libghostty-vt/zig-out
