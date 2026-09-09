@@ -699,7 +699,6 @@ mod tests {
         }
     }
 
-    // An alternate herdr cannot use is worth less than the keystroke carrying it.
     #[test]
     fn unusable_kitty_alternates_do_not_drop_the_key() {
         for sequence in [

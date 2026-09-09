@@ -230,7 +230,11 @@ fn try_encode_csi_u(key: &TerminalKey, flags: u16) -> Option<Vec<u8>> {
 
     let (codepoint, alternate_shifted) = match key.code {
         KeyCode::Char(c) => {
-            let base = canonical_kitty_char(ctrl_chord_char(key, c).unwrap_or(c), mods);
+            let resolved = match key.ctrl_chord_code() {
+                KeyCode::Char(resolved) => resolved,
+                _ => c,
+            };
+            let base = canonical_kitty_char(resolved, mods);
             let shifted = alternate_shifted_codepoint(key, flags);
             (base as u32, shifted)
         }
@@ -449,22 +453,6 @@ fn is_shifted_ascii_punctuation(ch: char) -> bool {
     )
 }
 
-/// The character a CONTROL chord is really about. Such a chord generates no
-/// text, so a non-ASCII reported character is incidental and the physical key
-/// is what the typist aimed at. Only non-ASCII consults the alternate, or
-/// Dvorak's physical `p` would send ctrl+p when the typist meant the ctrl+r
-/// they saw. None means the alternate is missing or unusable, leaving the
-/// reported character as the only thing left to send.
-fn ctrl_chord_char(key: &TerminalKey, ch: char) -> Option<char> {
-    if !key.modifiers.contains(KeyModifiers::CONTROL) {
-        return None;
-    }
-    if ch.is_ascii() {
-        return Some(ch);
-    }
-    key.base_layout_codepoint.and_then(char::from_u32)
-}
-
 fn canonical_kitty_char(ch: char, mods: KeyModifiers) -> char {
     if mods.contains(KeyModifiers::SHIFT) && ch.is_ascii_uppercase() {
         ch.to_ascii_lowercase()
@@ -506,7 +494,7 @@ fn kitty_event_suffix(key: &TerminalKey, flags: u16) -> Option<u8> {
 
 /// `None` rather than a narrowing cast: `ch as u8` truncates a non-ASCII layout
 /// char to its low byte, which can itself land inside C0 and run an unrelated
-/// command — U+3116 becomes ctrl+V.
+/// command: U+3116 becomes ctrl+V.
 fn legacy_ctrl_byte(ch: char) -> Option<u8> {
     let upper = ch.to_ascii_uppercase();
     Some(match upper {
@@ -524,7 +512,15 @@ fn legacy_ctrl_byte(ch: char) -> Option<u8> {
 fn encode_legacy_inner(key: TerminalKey) -> Vec<u8> {
     match key.code {
         KeyCode::Char(ch) => {
-            if let Some(byte) = ctrl_chord_char(&key, ch).and_then(legacy_ctrl_byte) {
+            let ctrl_byte = key
+                .modifiers
+                .contains(KeyModifiers::CONTROL)
+                .then(|| key.ctrl_chord_code())
+                .and_then(|code| match code {
+                    KeyCode::Char(resolved) => legacy_ctrl_byte(resolved),
+                    _ => None,
+                });
+            if let Some(byte) = ctrl_byte {
                 return vec![byte];
             }
 
@@ -581,8 +577,8 @@ mod tests {
     use super::*;
     use crate::input::parse_terminal_key_sequence;
 
-    // Captured from the build before the table was extracted: these record what
-    // the encoder did, not what it should do. Regenerate rather than edit.
+    // Characterization: records what the encoder did, not what it should do.
+    // Regenerate rather than edit.
     #[test]
     fn legacy_ctrl_ascii_matrix_is_unchanged() {
         let legacy_ctrl = |ch, modifiers| {
@@ -685,8 +681,7 @@ mod tests {
         }
     }
 
-    // The layout character wins whenever it is ASCII, so a Latin remapping keeps
-    // meaning what the typist typed: Dvorak's physical `p` types `r`.
+    // Dvorak's physical `p` types `r`, and the user means ctrl+r.
     #[test]
     fn legacy_ctrl_prefers_the_layout_char_over_base_layout_for_ascii() {
         let key = TerminalKey::new(KeyCode::Char('r'), KeyModifiers::CONTROL)
@@ -699,11 +694,9 @@ mod tests {
 
     #[test]
     fn kitty_panes_receive_the_base_layout_key_for_ctrl_chords() {
-        // ctrl+a and ctrl+c on Korean 2-set, captured from hardware: herdr sent
-        // the bare jamo and Claude Code printed it as text (herdrdev/herdr#2363
-        // reports the same table). That pane negotiates flags 1, so it would
-        // never read a third subfield; the physical key has to ride in the
-        // primary field.
+        // Korean 2-set ctrl+a and ctrl+c, captured from hardware; herdrdev/herdr#2363
+        // reports the same table. The pane negotiates flags 1, so it never reads a
+        // third subfield and the physical key has to ride in the primary field.
         for (sequence, flags, expected) in [
             ("\x1b[12609::97;5u", 1u16, "\x1b[97;5u"),
             ("\x1b[12618::99;5u", 1, "\x1b[99;5u"),
