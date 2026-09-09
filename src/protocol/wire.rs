@@ -312,7 +312,9 @@ impl ClientPaneInputEvent {
         let physical_key_id = key.physical_key_id();
         let windows_record = key.windows_record();
         Some(Self::Key {
-            code: ClientKeyCode::from_crossterm(key.code)?,
+            // Resolved here: the generation-1 input codec has no field for the
+            // layout alternate.
+            code: ClientKeyCode::from_crossterm(key.ctrl_chord_code())?,
             modifiers: key.modifiers.bits(),
             kind: ClientKeyKind::from_crossterm(key.kind),
             repeat_count: key.repeat_count,
@@ -2109,6 +2111,47 @@ mod tests {
         );
         assert_ne!(encoded, b"/");
         assert!(encoded.starts_with(b"\x1b["));
+    }
+
+    // The host reports the layout jamo plus the base-layout key it sits on, and the
+    // generation-1 codec carries no field for the alternate. ctrl+c typed under a
+    // Korean 2-set IME must still interrupt the pane.
+    #[test]
+    fn ctrl_chord_reaches_the_pane_as_the_base_layout_key() {
+        for (sequence, protocol, expected) in [
+            (
+                "\x1b[12609::97;5u",
+                crate::input::KeyboardProtocol::Kitty { flags: 1 },
+                &b"\x1b[97;5u"[..],
+            ),
+            (
+                "\x1b[12618::99;5u",
+                crate::input::KeyboardProtocol::Kitty { flags: 1 },
+                b"\x1b[99;5u",
+            ),
+            (
+                "\x1b[12618::99;5u",
+                crate::input::KeyboardProtocol::Legacy,
+                b"\x03",
+            ),
+        ] {
+            let key = crate::input::parse_terminal_key_sequence(sequence).expect("sequence parses");
+            let event = ClientPaneInputEvent::from_terminal_key(key).expect("semantic pane key");
+            let encoded = bincode::serde::encode_to_vec(&event, bincode::config::standard())
+                .expect("encode pane input");
+            let (decoded, _): (ClientPaneInputEvent, _) =
+                bincode::serde::decode_from_slice(&encoded, bincode::config::standard())
+                    .expect("decode pane input");
+            let crate::raw_input::RawInputEvent::Key(server_side) = decoded.to_raw_input_event()
+            else {
+                panic!("{sequence}: pane key should remain a key");
+            };
+            assert_eq!(
+                crate::input::encode_terminal_key(server_side, protocol),
+                expected,
+                "{sequence}"
+            );
+        }
     }
 
     #[test]

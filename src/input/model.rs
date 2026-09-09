@@ -76,6 +76,7 @@ pub struct TerminalKey {
     pub kind: crossterm::event::KeyEventKind,
     pub repeat_count: u16,
     pub shifted_codepoint: Option<u32>,
+    pub base_layout_codepoint: Option<u32>,
     pub generated_text: Option<String>,
     physical_identity_hint: bool,
     windows_shift_dead_key: bool,
@@ -90,6 +91,7 @@ impl TerminalKey {
             kind: crossterm::event::KeyEventKind::Press,
             repeat_count: 1,
             shifted_codepoint: None,
+            base_layout_codepoint: None,
             generated_text: None,
             physical_identity_hint: false,
             windows_shift_dead_key: false,
@@ -123,6 +125,34 @@ impl TerminalKey {
     pub fn with_shifted_codepoint(mut self, shifted_codepoint: u32) -> Self {
         self.shifted_codepoint = Some(shifted_codepoint);
         self
+    }
+
+    pub fn with_base_layout_codepoint(mut self, base_layout_codepoint: u32) -> Self {
+        self.base_layout_codepoint = Some(base_layout_codepoint);
+        self
+    }
+
+    /// The key a CONTROL chord is really about. Such a chord generates no text,
+    /// so a non-ASCII reported character is incidental and the physical key is
+    /// what the typist aimed at. Only non-ASCII consults the alternate, or
+    /// Dvorak's physical `p` would send ctrl+p when the typist meant the ctrl+r
+    /// they saw. Without the CONTROL gate an unmodified AZERTY `é` would match
+    /// `prefix+2` and a German `ü` would match `prefix+[`.
+    ///
+    /// The layout alternate is a fact about the host keyboard, so it is resolved
+    /// client-side: keybind matching and the pane input event both state the rule
+    /// here, and only the resolved key crosses the wire.
+    pub(crate) fn ctrl_chord_code(&self) -> KeyCode {
+        match self.code {
+            KeyCode::Char(ch)
+                if !ch.is_ascii() && self.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                self.base_layout_codepoint
+                    .and_then(char::from_u32)
+                    .map_or(self.code, KeyCode::Char)
+            }
+            _ => self.code,
+        }
     }
 
     pub(crate) fn with_generated_text(mut self, text: Option<String>) -> Self {
