@@ -392,14 +392,7 @@ fn status_name(state: crate::detect::AgentState, seen: bool) -> String {
         (crate::detect::AgentState::Blocked, _) => AgentStatus::Blocked,
         (crate::detect::AgentState::Unknown, _) => AgentStatus::Unknown,
     };
-    match status {
-        AgentStatus::Idle => "idle",
-        AgentStatus::Working => "working",
-        AgentStatus::Blocked => "blocked",
-        AgentStatus::Done => "done",
-        AgentStatus::Unknown => "unknown",
-    }
-    .to_string()
+    status.as_str().to_string()
 }
 
 fn public_tab_id(app: &AppState, entry: &AgentPanelEntry) -> Option<String> {
