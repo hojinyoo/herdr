@@ -498,6 +498,11 @@ pub(crate) enum ServerEvent {
     ClientShellMouseCapture { client_id: u64, enabled: bool },
     /// The committed shell asks the server to replay presentation effects before input resumes.
     ClientShellPresentationSync { client_id: u64, token: String },
+    /// One native file transfer control from a client.
+    ClientFileTransfer {
+        client_id: u64,
+        control: crate::protocol::file_transfer::ClientFileTransferControl,
+    },
     /// A client-owned shell invoked one endpoint operation through this connection.
     ClientShellEndpointRequest {
         client_id: u64,
@@ -1287,6 +1292,19 @@ fn client_read_loop_with_endpoint_controls(
                 ServerEvent::ClientShellPresentationSync {
                     client_id,
                     token: data,
+                }
+            }
+            ClientMessage::EndpointControl { kind, data }
+                if kind == crate::protocol::file_transfer::CLIENT_FILE_TRANSFER_KIND =>
+            {
+                match serde_json::from_str(&data) {
+                    Ok(control) => ServerEvent::ClientFileTransfer { client_id, control },
+                    Err(error) => {
+                        // A malformed control is the peer's problem, not this
+                        // session's: an unusable transfer must not drop panes.
+                        debug!(client_id, %error, "ignoring malformed file transfer control");
+                        continue;
+                    }
                 }
             }
             ClientMessage::EndpointControl { kind, data } => {

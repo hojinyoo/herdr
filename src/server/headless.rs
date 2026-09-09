@@ -193,7 +193,7 @@ enum AltScreenReadConflict {
 
 /// The headless server — runs the herdr event loop without a real terminal.
 pub struct HeadlessServer {
-    app: app::App,
+    pub(super) app: app::App,
     #[cfg(unix)]
     api_tx: Option<api::ApiRequestSender>,
     // Kept on every platform so dropping HeadlessServer owns API server shutdown.
@@ -208,6 +208,9 @@ pub struct HeadlessServer {
     next_client_id: u64,
     /// The client currently driving session-wide host presentation and side effects.
     foreground_client_id: Option<u64>,
+    /// The one native file transfer in flight, if any. One at a time keeps the
+    /// stop-and-wait bookkeeping to a single slot.
+    pub(super) file_transfer: Option<super::file_transfer::ServerTransfer>,
     /// Ephemeral shell connection controlling PTY geometry for each stable tab id.
     tab_geometry_controllers: HashMap<String, u64>,
     /// Stable tab id whose viewers may see and interact with the one terminal popup.
@@ -351,6 +354,7 @@ impl HeadlessServer {
             #[cfg(unix)]
             next_client_id: 1,
             foreground_client_id: None,
+            file_transfer: None,
             tab_geometry_controllers: HashMap::new(),
             popup_owner_tab_id: None,
             client_shell_boot_id: format!(
@@ -532,6 +536,7 @@ impl HeadlessServer {
                 needs_render = true;
                 needs_graphics_render = true;
             }
+            self.expire_stalled_file_transfer(now);
 
             self.drain_client_config_reload_request();
             self.sync_immediate_pty_sources();
@@ -993,6 +998,9 @@ impl HeadlessServer {
     }
 
     fn remove_client(&mut self, client_id: u64) -> bool {
+        // Every removal path lands here, so a clean detach cannot leave the
+        // single transfer slot held for the rest of the session.
+        self.abort_file_transfer_for_client(client_id);
         self.retire_direct_graphics_for_client(client_id);
         let disconnected_focus = self
             .clients
@@ -1694,7 +1702,7 @@ impl HeadlessServer {
 
     /// Sends a message to a specific client. Returns false if the client
     /// was not found or the send failed (client removed).
-    fn send_to_client(&mut self, client_id: u64, msg: ServerMessage) -> bool {
+    pub(super) fn send_to_client(&mut self, client_id: u64, msg: ServerMessage) -> bool {
         let serialized = match Self::frame_server_message(&msg) {
             Ok(framed) => framed,
             Err(err) => {
@@ -2330,6 +2338,10 @@ impl HeadlessServer {
                 client.shell_mouse_capture = enabled;
                 client.host_mouse_capture_active = None;
                 true
+            }
+            ServerEvent::ClientFileTransfer { client_id, control } => {
+                self.handle_client_file_transfer_control(client_id, control);
+                false
             }
             ServerEvent::ClientShellPresentationSync { client_id, token } => {
                 let Some(client) = self.clients.get_mut(&client_id) else {
