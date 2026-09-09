@@ -479,11 +479,15 @@ fn mobile_menu_keeps_inert_notes_open_and_cancel_without_workspace_in_navigate()
     state.set_pane_surface(surface());
     state.mode = ClientShellMode::Navigate;
     state.compose(44, 20).expect("mobile switcher");
+    let notes_index = global_menu_index(&state, "what's new");
     let inert_notes = state
         .hits
         .mobile_targets
         .iter()
-        .find_map(|(rect, target)| matches!(target, ClientMobileTarget::Menu(3)).then_some(*rect))
+        .find_map(|(rect, target)| {
+            matches!(target, ClientMobileTarget::Menu(index) if *index == notes_index)
+                .then_some(*rect)
+        })
         .expect("what's new row");
     state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),

@@ -459,6 +459,11 @@ impl ClientShellState {
                     search_focused: true,
                     ..
                 }))
+                // The send prompt takes a file path, which is the value people
+                // paste most; without this Cmd+V types a literal "v" into it.
+                | Some(ClientShellOverlay::FileTransfer(
+                    ClientFileTransferOverlay::SendPath(_)
+                ))
         )
     }
 

@@ -4,6 +4,8 @@ use super::*;
 pub(super) enum ClientGlobalMenuAction {
     Binding(crate::input::KeybindAction),
     WhatsNew,
+    SendFile,
+    ReceiveFile,
 }
 
 pub(super) fn global_menu_attention(snapshot: &ClientShellSnapshot) -> bool {
@@ -35,6 +37,8 @@ pub(super) fn global_menu_items(
             "reload config",
             ClientGlobalMenuAction::Binding(crate::input::KeybindAction::ReloadConfig),
         ),
+        ("send file", ClientGlobalMenuAction::SendFile),
+        ("receive file", ClientGlobalMenuAction::ReceiveFile),
     ];
     if snapshot.update_available.is_some() || snapshot.latest_release_notes_available {
         items.push((
@@ -104,6 +108,8 @@ impl ClientShellState {
                 self.record_binding(crate::input::KeybindMatch::Action(binding), outcome)
             }
             ClientGlobalMenuAction::WhatsNew => self.open_release_notes(),
+            ClientGlobalMenuAction::SendFile => self.open_file_transfer_send(),
+            ClientGlobalMenuAction::ReceiveFile => self.open_file_transfer_receive(outcome),
         }
         outcome.repaint = true;
     }

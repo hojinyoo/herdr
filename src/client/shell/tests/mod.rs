@@ -208,11 +208,22 @@ fn surface_with_popup() -> PaneSurfaceFrame {
     surface
 }
 
+/// Looks a global-menu row up by label rather than by a fixed offset: the menu
+/// grows over time, and a hardcoded index would quietly start driving a
+/// different command instead of failing.
+pub(super) fn global_menu_index(state: &ClientShellState, label: &str) -> usize {
+    super::global_menu::global_menu_items(state.snapshot.as_deref().expect("snapshot"))
+        .iter()
+        .position(|(item, _)| *item == label)
+        .unwrap_or_else(|| panic!("no {label} entry in the global menu"))
+}
+
 mod agents_worktrees_notifications;
 mod chrome_context;
 mod copy;
 mod endpoint_requests;
 mod endpoints;
+mod file_transfer;
 #[path = "input.rs"]
 mod input_domain;
 mod keybindings_settings;

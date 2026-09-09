@@ -1,7 +1,10 @@
 use super::*;
 
+mod file_transfer_overlay;
 mod settings_overlay;
 mod worktree_overlays;
+
+pub(crate) use file_transfer_overlay::browser_visible_rows as file_transfer_browser_visible_rows;
 
 #[derive(Default)]
 pub(crate) struct OverlayRender {
@@ -13,6 +16,7 @@ pub(crate) struct OverlayRender {
     pub(crate) navigator_rows: Vec<(Rect, ClientNavigatorTarget)>,
     pub(crate) worktree_search: Rect,
     pub(crate) worktree_rows: Vec<(Rect, usize)>,
+    pub(crate) file_transfer_rows: Vec<(Rect, usize)>,
     pub(crate) help_popup: Rect,
     pub(crate) help_scrollbar: Rect,
     pub(crate) help_scroll_metrics: Option<crate::pane::ScrollMetrics>,
@@ -74,6 +78,9 @@ pub(crate) fn render_client_overlay(
         }
         ClientShellOverlay::WorktreeRemove(v) => {
             worktree_overlays::render_worktree_remove_overlay(b, v, p)
+        }
+        ClientShellOverlay::FileTransfer(v) => {
+            file_transfer_overlay::render_file_transfer_overlay(b, v, p)
         }
         ClientShellOverlay::ContextMenu(_) | ClientShellOverlay::GlobalMenu(_) => None,
     }
