@@ -41,8 +41,10 @@ review comment.
   incompatible wire change on this line bumps to 21, and every later incompatible change before 21 ships
   does **not** bump again. Update hardcoded protocol expectations and manual protocol fixtures in tests
   with the bump.
-- **Changelog.** `docs/next/CHANGELOG.md` takes user-facing runtime changes only. Stage 2 is internal and
-  gets none.
+- **Changelog.** Do **not** edit `docs/next/CHANGELOG.md` from any of these stages. It is curated during
+  stable release preparation, and normal feature work touching it makes long-lived branches conflict over
+  one shared file. What each user-facing stage owes instead is a descriptive commit subject and a
+  `refs #<issue-number>` line, which is what the pre-release audit inventories.
 - **Refactor risk.** Stages 3, 4 and 6 touch state, identity or persisted snapshots. Classify them as
   refactor-risk: name the protected behaviour, add or name characterization tests before moving code,
   use `AppState::assert_invariants_for_test()` with `AppState::test_with_adversarial_identity_state()`,
@@ -114,7 +116,7 @@ both already PTY-free), `src/api/schema/worktrees.rs`, `src/app/api/worktrees.rs
 7. `herdr worktree status <path|branch|workspace>` in `src/cli/worktree.rs`, JSON out, rc 0/1/2.
 
 **Wire.** `path` optional is incompatible. **Bump `PROTOCOL_VERSION` 20 to 21 here, once.** Regenerate
-the API schema artifact. Changelog entry.
+the API schema artifact.
 
 **Acceptance.** Table-driven classification including the submodule shape. `status` honours the rc
 contract. The default `worktree list` call runs no `git for-each-ref`.
@@ -149,7 +151,7 @@ unable to target a `closed` checkout at all), `src/app/api/worktrees.rs` and
    current users.
 
 **Wire.** Additive params plus optional `workspace_id`. If Stage 3 already bumped to 21 and 21 has not
-shipped, do not bump again. Regenerate the schema artifact. Changelog entry.
+shipped, do not bump again. Regenerate the schema artifact.
 
 **Acceptance.** Teardown of an `open` bench leaves no workspace, no checkout, and with `delete_branch` no
 branch. `dry_run` mutates nothing. A `foreign` target is refused with nothing destroyed. The collateral
@@ -181,7 +183,7 @@ correctly but for the wrong reason. Anything needing a real proof supplies its o
    resolution the create will use, so preview and result cannot diverge.
 
 **Repo.** `[[worktrees.path]]` is an array of tables; confirm whether `config_reference_check` wants a
-`SKIPPED_SUBTREES` entry or per-key rows. Config docs edits need ja and zh-cn parity. Changelog entry.
+`SKIPPED_SUBTREES` entry or per-key rows. Config docs edits need ja and zh-cn parity.
 
 **Acceptance.** Two branch shapes land in two different trees, which is the one thing
 `[worktrees] directory` cannot express and the popup's entire reason to exist. A fall-through refuses
@@ -219,7 +221,7 @@ plus the event wiring in `src/app/`.
 **Perf.** If any part lands in a pane-scaled path, profile fixed geometry at 1 and at least 15 populated
 panes with `just bench-render-scale` and report the scaling delta.
 
-**Repo.** Config reference rows for every key. Changelog entry. Doc page edits need ja and zh-cn parity.
+**Repo.** Config reference rows for every key. Doc page edits need ja and zh-cn parity.
 
 **Acceptance.** A configured derivation stamps a fresh bench and refuses a human-renamed one. `clear`
 removes a stale chip. A restart re-derives. With no config block, nothing is written anywhere.
@@ -270,6 +272,6 @@ throwaway session before it is pointed at anything that matters.
 - `just check` green.
 - API schema artifact regenerated when schema types changed.
 - Config reference updated when config keys changed.
-- Changelog entry for user-facing changes only.
+- Descriptive commit subject, plus `refs #<issue-number>` when an issue exists. No changelog edit.
 - Characterization tests named and passing on the refactor-risk stages.
 - No `unwrap()` in production code, no placeholder branches, no skipped tests standing in for work.
