@@ -142,6 +142,7 @@ impl ClientShellConfig {
             preferences: preferences::ClientChromePreferences::default(),
             startup_config_diagnostic: None,
             startup_onboarding: false,
+            file_transfer_dir: config.remote.file_transfer_dir.clone(),
         }
     }
 
@@ -335,6 +336,9 @@ impl ClientShellConfig {
         if !invalid_section("experimental") {
             self.switch_ascii_input_source_in_prefix =
                 config.experimental.switch_ascii_input_source_in_prefix;
+        }
+        if !invalid_section("remote") {
+            self.file_transfer_dir = config.remote.file_transfer_dir.clone();
         }
 
         diagnostics

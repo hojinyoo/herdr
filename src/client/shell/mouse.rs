@@ -1334,6 +1334,37 @@ impl ClientShellState {
             }
             return;
         }
+        if matches!(self.overlay, Some(ClientShellOverlay::FileTransfer(_))) {
+            match mouse.kind {
+                MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                    self.scroll_file_browser(
+                        if mouse.kind == MouseEventKind::ScrollUp {
+                            -1
+                        } else {
+                            1
+                        },
+                        outcome,
+                    );
+                }
+                MouseEventKind::Down(MouseButton::Left) => {
+                    if super::contains(self.hits.overlay_cancel, point) {
+                        self.cancel_file_transfer_overlay(outcome);
+                    } else if let Some((_, index)) = self
+                        .hits
+                        .file_transfer_rows
+                        .iter()
+                        .find(|(rect, _)| super::contains(*rect, point))
+                        .copied()
+                    {
+                        self.activate_file_browser_row(index, outcome);
+                    } else if super::contains(self.hits.overlay_primary, point) {
+                        self.accept_file_transfer_overlay(outcome);
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
         if matches!(
             self.overlay,
             Some(

@@ -281,7 +281,7 @@ fn global_menu_opens_from_sidebar_and_routes_client_actions() {
     assert!(matches!(state.overlay, Some(ClientShellOverlay::Help(_))));
 
     state.overlay = Some(ClientShellOverlay::GlobalMenu(ClientGlobalMenuOverlay {
-        highlighted: 3,
+        highlighted: global_menu_index(&state, "detach"),
     }));
     let detach = state.handle_input_bytes(b"\r");
     assert!(detach.detach);

@@ -572,6 +572,7 @@ impl ClientShellState {
                 self.hits.navigator_rows = rendered.navigator_rows;
                 self.hits.worktree_search = rendered.worktree_search;
                 self.hits.worktree_rows = rendered.worktree_rows;
+                self.hits.file_transfer_rows = rendered.file_transfer_rows;
                 self.hits.help_popup = rendered.help_popup;
                 self.hits.help_scrollbar = rendered.help_scrollbar;
                 self.hits.help_scroll_metrics = rendered.help_scroll_metrics;
@@ -590,6 +591,10 @@ impl ClientShellState {
                 rendered.cursor
             };
             frame.replace_from_ratatui_buffer_preserving_effects(&composed, cursor);
+        }
+        if matches!(self.overlay, Some(ClientShellOverlay::FileTransfer(_))) {
+            let rows = render::file_transfer_browser_visible_rows(Rect::new(0, 0, cols, rows));
+            self.set_file_browser_visible_rows(rows);
         }
         if let Some(ClientShellOverlay::Help(help)) = self.overlay.as_mut() {
             help.scroll = help.scroll.min(self.hits.help_max_scroll);

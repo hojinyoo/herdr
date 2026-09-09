@@ -107,6 +107,9 @@ pub(crate) struct ClientShellConfig {
     pub(super) preferences: preferences::ClientChromePreferences,
     pub(super) startup_config_diagnostic: Option<String>,
     pub(super) startup_onboarding: bool,
+    /// Where received files land, before tilde expansion. Client-local by
+    /// definition: the server never sees this path.
+    pub(super) file_transfer_dir: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -179,6 +182,7 @@ pub(super) struct ShellHitMap {
     pub(super) navigator_rows: Vec<(Rect, ClientNavigatorTarget)>,
     pub(super) worktree_search: Rect,
     pub(super) worktree_rows: Vec<(Rect, usize)>,
+    pub(super) file_transfer_rows: Vec<(Rect, usize)>,
     pub(super) help_popup: Rect,
     pub(super) help_scrollbar: Rect,
     pub(super) help_scroll_metrics: Option<crate::pane::ScrollMetrics>,
@@ -342,6 +346,7 @@ pub(super) enum ClientShellOverlayKind {
     ContextMenu,
     GlobalMenu,
     Settings,
+    FileTransfer,
 }
 
 #[derive(Debug)]
@@ -581,6 +586,8 @@ pub(super) enum ClientContextMenuAction {
     Zoom,
     ToggleRightClickPassthrough,
     ClosePane,
+    SendFile,
+    ReceiveFile,
 }
 
 #[derive(Debug)]
@@ -640,6 +647,7 @@ pub(super) enum ClientShellOverlay {
     ContextMenu(ClientContextMenuOverlay),
     GlobalMenu(ClientGlobalMenuOverlay),
     Settings(ClientSettingsOverlay),
+    FileTransfer(ClientFileTransferOverlay),
 }
 
 impl ClientShellOverlay {
@@ -658,6 +666,7 @@ impl ClientShellOverlay {
             Self::ContextMenu(_) => ClientShellOverlayKind::ContextMenu,
             Self::GlobalMenu(_) => ClientShellOverlayKind::GlobalMenu,
             Self::Settings(_) => ClientShellOverlayKind::Settings,
+            Self::FileTransfer(_) => ClientShellOverlayKind::FileTransfer,
         }
     }
 }
@@ -952,6 +961,8 @@ pub(crate) struct ClientShellState {
     pub(super) copy_feedback_deadline: Option<std::time::Instant>,
     pub(super) host_mouse_pixels: Option<crate::input::mouse::HostPixels>,
     pub(super) input_leases: ClientInputLeases,
+    /// Client-allocated ids for the one native file transfer at a time.
+    pub(super) next_file_transfer_id: u64,
     pub(super) popup_pending: bool,
     pub(super) popup_pending_deadline: Option<std::time::Instant>,
     pub(super) next_request_id: u64,
@@ -1095,6 +1106,7 @@ impl ClientShellState {
             copy_feedback_deadline: None,
             host_mouse_pixels: None,
             input_leases: ClientInputLeases::default(),
+            next_file_transfer_id: 0,
             popup_pending: false,
             popup_pending_deadline: None,
             next_request_id: 1,

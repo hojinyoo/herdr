@@ -63,6 +63,8 @@ impl ClientContextMenuOverlay {
                     item("Split right", Action::SplitRight),
                     item("Split down", Action::SplitDown),
                     item("Zoom", Action::Zoom),
+                    item("Send file...", Action::SendFile),
+                    item("Receive file...", Action::ReceiveFile),
                     item(
                         if *right_click_passthrough {
                             "Use Herdr right-click menu"
@@ -462,6 +464,16 @@ impl ClientShellState {
             ),
             ClientContextMenuAction::ClosePane => {
                 self.push_endpoint_method(Method::PaneClose(PaneTarget { pane_id }), outcome)
+            }
+            // The transfer runs against the focused pane's working directory,
+            // so focus the pane the menu was opened on before starting.
+            ClientContextMenuAction::SendFile | ClientContextMenuAction::ReceiveFile => {
+                self.push_endpoint_method(Method::PaneFocus(PaneTarget { pane_id }), outcome);
+                if action == ClientContextMenuAction::SendFile {
+                    self.open_file_transfer_send();
+                } else {
+                    self.open_file_transfer_receive(outcome);
+                }
             }
             _ => {}
         }
