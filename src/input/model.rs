@@ -132,6 +132,29 @@ impl TerminalKey {
         self
     }
 
+    /// The key a CONTROL chord is really about. Such a chord generates no text,
+    /// so a non-ASCII reported character is incidental and the physical key is
+    /// what the typist aimed at. Only non-ASCII consults the alternate, or
+    /// Dvorak's physical `p` would send ctrl+p when the typist meant the ctrl+r
+    /// they saw. Without the CONTROL gate an unmodified AZERTY `é` would match
+    /// `prefix+2` and a German `ü` would match `prefix+[`.
+    ///
+    /// The layout alternate is a fact about the host keyboard, so it is resolved
+    /// client-side: keybind matching and the pane input event both state the rule
+    /// here, and only the resolved key crosses the wire.
+    pub(crate) fn ctrl_chord_code(&self) -> KeyCode {
+        match self.code {
+            KeyCode::Char(ch)
+                if !ch.is_ascii() && self.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                self.base_layout_codepoint
+                    .and_then(char::from_u32)
+                    .map_or(self.code, KeyCode::Char)
+            }
+            _ => self.code,
+        }
+    }
+
     pub(crate) fn with_generated_text(mut self, text: Option<String>) -> Self {
         self.generated_text = if self.kind == crossterm::event::KeyEventKind::Release {
             None

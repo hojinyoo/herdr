@@ -1335,27 +1335,11 @@ pub fn key_event_matches_combo(key: &KeyEvent, combo: KeyCombo) -> bool {
 
 pub fn terminal_key_matches_combo(key: &TerminalKey, combo: KeyCombo) -> bool {
     key_parts_match_combo(
-        physical_key_code(key),
+        key.ctrl_chord_code(),
         key.modifiers,
         key.shifted_codepoint,
         combo,
     )
-}
-
-/// Same rule as the control-byte branch of `encode_legacy_inner`: a chord
-/// carrying CONTROL generates no text, so the physical key is what the typist
-/// aimed at, and only then is the reported character worth overriding. Without
-/// the CONTROL gate an unmodified AZERTY `é` matches `prefix+2` and a German
-/// `ü` matches `prefix+[`. Non-ASCII alone is not the discriminator, or Dvorak
-/// would match by key position instead of the letter typed.
-fn physical_key_code(key: &TerminalKey) -> KeyCode {
-    match key.code {
-        KeyCode::Char(ch) if !ch.is_ascii() && key.modifiers.contains(KeyModifiers::CONTROL) => key
-            .base_layout_codepoint
-            .and_then(char::from_u32)
-            .map_or(key.code, KeyCode::Char),
-        _ => key.code,
-    }
 }
 
 fn key_parts_match_combo(
