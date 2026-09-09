@@ -165,6 +165,18 @@ pub enum AgentStatus {
     Unknown,
 }
 
+impl AgentStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Working => "working",
+            Self::Blocked => "blocked",
+            Self::Done => "done",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
 pub(crate) fn default_true() -> bool {
     true
 }

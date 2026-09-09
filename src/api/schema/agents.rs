@@ -4,6 +4,29 @@ use serde::{Deserialize, Serialize};
 
 use super::common::{AgentStatus, ReadFormat, ReadSource};
 
+/// The built-in "attn" view: the workers that need a human.
+///
+/// Shared so the two halves cannot drift. The runtime filters on `ATTN_STATUSES`; the client asks
+/// the same list whether entering attn would show anything before requesting it.
+pub const ATTN_VIEW_SOURCE: &str = "ui.agent_panel";
+pub const ATTN_VIEW_LABEL: &str = "attn";
+pub const ATTN_STATUSES: [AgentStatus; 2] = [AgentStatus::Blocked, AgentStatus::Done];
+
+pub fn attn_view() -> AgentViewSetParams {
+    AgentViewSetParams {
+        source: ATTN_VIEW_SOURCE.to_string(),
+        label: Some(ATTN_VIEW_LABEL.to_string()),
+        filter: Some(AgentViewFilter::In {
+            field: AgentViewField::Builtin(AgentViewBuiltinField::Status),
+            values: ATTN_STATUSES
+                .iter()
+                .map(|status| AgentViewValue::String(status.as_str().to_string()))
+                .collect(),
+        }),
+        sort: Vec::new(),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AgentReadParams {
     pub target: String,
