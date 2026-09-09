@@ -238,7 +238,8 @@ fn sanitize_literal_text(value: &str) -> Option<String> {
     (!value.is_empty()).then_some(value)
 }
 
-fn sanitize_status_text(value: &str) -> Option<String> {
+/// Used for any label supplied by something outside Herdr.
+pub(super) fn sanitize_status_text(value: &str) -> Option<String> {
     let value: String = value
         .trim()
         .chars()
