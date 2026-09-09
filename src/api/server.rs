@@ -99,7 +99,7 @@ fn start_server_inner(
                     let capabilities = capabilities.clone();
                     let server_stop = server_stop.clone();
                     let connection_running = Arc::clone(&listener_running);
-                    std::thread::spawn(move || {
+                    if let Err(err) = spawn_connection_thread(move || {
                         if let Err(err) = handle_connection_with_stop(
                             stream,
                             &api_tx,
@@ -110,7 +110,9 @@ fn start_server_inner(
                         ) {
                             warn!(err = %err, "api connection failed");
                         }
-                    });
+                    }) {
+                        warn!(err = %err, "failed to spawn api connection thread; dropping connection");
+                    }
                 }
                 Err(err) => {
                     error!(err = %err, "api listener accept failed");
@@ -127,6 +129,31 @@ fn start_server_inner(
         identity,
         running,
     })
+}
+
+/// Test hook: fails the next [`spawn_connection_thread`] call.
+#[cfg(test)]
+static FAIL_CONNECTION_SPAWN: AtomicBool = AtomicBool::new(false);
+
+/// The accept loop has to survive a failed spawn: dropping this connection
+/// costs one request, while letting the failure unwind the listener thread
+/// leaves the process running with no api server behind the socket.
+fn spawn_connection_thread<F>(handler: F) -> std::io::Result<()>
+where
+    F: FnOnce() + Send + 'static,
+{
+    #[cfg(test)]
+    if FAIL_CONNECTION_SPAWN.swap(false, Ordering::Relaxed) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::WouldBlock,
+            "forced api connection spawn failure",
+        ));
+    }
+
+    std::thread::Builder::new()
+        .name("herdr-api-connection".into())
+        .spawn(handler)
+        .map(|_| ())
 }
 
 fn prepare_socket_path(path: &Path) -> std::io::Result<()> {
@@ -1117,6 +1144,51 @@ mod tests {
         drop(_listener);
         let _ = fs::remove_file(&path);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn accept_loop_survives_connection_thread_spawn_failure() {
+        let _guard = env_lock().lock().unwrap();
+        let path = unique_test_path("api-spawn-failure");
+        std::env::remove_var(crate::session::SESSION_ENV_VAR);
+        crate::session::clear_explicit_session_for_test();
+        std::env::set_var(crate::api::SOCKET_PATH_ENV_VAR, &path);
+
+        let (api_tx, mut api_rx) = mpsc::unbounded_channel::<ApiRequestMessage>();
+        let handle = start_server_inner(api_tx, EventHub::default(), None, None).unwrap();
+
+        // The first accepted connection loses its handler thread, so the request
+        // it already sent must never reach the app.
+        FAIL_CONNECTION_SPAWN.store(true, Ordering::Relaxed);
+        let mut dropped = crate::ipc::connect_local_stream(&path).unwrap();
+        dropped
+            .write_all(br#"{"id":"req_dropped","method":"workspace.list","params":{}}"#)
+            .unwrap();
+        dropped.write_all(b"\n").unwrap();
+        dropped.flush().unwrap();
+
+        // The accept loop is still alive, so the next connection is served.
+        let mut client = crate::ipc::connect_local_stream(&path).unwrap();
+        client
+            .write_all(br#"{"id":"req_alive","method":"workspace.list","params":{}}"#)
+            .unwrap();
+        client.write_all(b"\n").unwrap();
+        client.flush().unwrap();
+
+        let msg = api_rx.blocking_recv().unwrap();
+        assert_eq!(msg.request.id, "req_alive");
+        msg.respond_to
+            .send(r#"{"id":"req_alive","result":{"type":"ok"}}"#.to_string())
+            .unwrap();
+        assert!(read_line(&mut client).contains("req_alive"));
+        assert!(
+            api_rx.try_recv().is_err(),
+            "req_dropped must never reach the app: its handler thread never started"
+        );
+
+        drop(handle);
+        std::env::remove_var(crate::api::SOCKET_PATH_ENV_VAR);
+        let _ = fs::remove_file(&path);
     }
 
     #[test]
