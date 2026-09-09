@@ -51,6 +51,11 @@ review comment.
   and run a roundtable.
 - **Code conventions.** No `unwrap()` in production code, `tracing` for logging, `#[allow]` only with a
   reason, platform-specific behaviour compile-gated into `src/platform/`.
+- **Re-check the file list against the current base before starting a stage.** These lists are
+  snapshots, and the runtime/client migration is actively moving code out from under them: 0.9.0
+  deleted `src/app/input/` and moved the sidebar into `src/client/shell/`, which stranded a branch
+  written a week earlier badly enough that it could not be rebased. Stage 3's list of `WorktreeInfo`
+  consumers is the next one worth re-verifying.
 - **Commits.** Lowercase conventional, no emoji, no AI co-author line, `refs #<n>` only when a real issue
   exists.
 
@@ -230,14 +235,21 @@ removes a stale chip. A restart re-derives. With no config block, nothing is wri
 
 Smallest and fully independent. Good first landing to exercise the whole pipeline.
 
-**Files.** `src/app/agent_view.rs`, the agent view schema, `src/ui/sidebar.rs` (`AgentPanelSort` at :83),
-`src/config/keybinds.rs`.
+**Files.** `src/app/agent_view.rs` for the preset, and `src/client/shell/agent_sidebar.rs` for the
+control that installs it.
+
+The split matters here and is the reason this file list was rewritten: 0.9.0 completed the
+runtime/client separation, so the panel's rendering and hit testing moved out of `src/ui/sidebar.rs`
+and `src/app/input/` (both gone) into the client shell. The preset is a runtime fact and stays in
+`src/app`; the control that cycles to it is presentation and stays in the client. A first attempt
+written against the 0.8.2 layout could not be rebased across that move.
 
 1. A built-in preset filtering agent status to `blocked` or `done`, installed through the existing
    declarative `agent_view` filter and sort machinery.
-2. Empty-set guard: with nothing matching, do not install the view, notify instead. Expanded, herdr draws
-   `no matching agents` itself; collapsed, `render_sidebar_collapsed` draws neither that text nor the view
-   label, so a filtered-empty sidebar and a dead herdr look identical.
+2. Empty-set guard: with nothing matching, do not install the view. Expanded, herdr draws
+   `no matching agents` itself; collapsed, the sidebar draws neither that text nor the view label, so a
+   filtered-empty panel and a dead herdr look identical. Skipping the position beats installing an
+   empty view, and the guard asks through the preset's own filter so the two cannot drift apart.
 3. The client cycles `grouped` to `priority` to `attn`, with a keybind toggle.
 4. Counting distinguishes "I could not look" from "nothing needs you": a response that parses and carries
    no error is not yet a response of the expected shape.
