@@ -229,7 +229,7 @@ herdr pane run <pane_id> <command>
 
 标准拼写是 `esc`;也接受 `escape`。
 
-`pane run` 会遵循当前的 bracketed paste 模式,并把文本和 Enter 作为一个原子操作提交。发送命令时优先用它,而不是 `send-text` 加 `send-keys Enter`;单独的发送操作仍是底层操作,不会提交命令。
+`pane send-text` 和 `pane run` 都会遵循当前的 bracketed paste 模式,因此多行文本会作为一次粘贴进入 TUI 输入框,而不是逐键重放。`pane run` 还会把文本和 Enter 作为一个原子操作提交;发送命令时优先用它,而不是 `send-text` 加 `send-keys Enter`,因为单独的发送操作仍是底层操作,不会提交命令。
 
 从自定义钩子上报智能体状态:
 

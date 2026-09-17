@@ -229,7 +229,7 @@ herdr pane run <pane_id> <command>
 
 標準表記は `esc` ですが、`escape` も使えます。
 
-`pane run` は現在の bracketed paste モードを尊重し、テキストと Enter をアトミックに送信します。コマンドには `send-text` + `send-keys Enter` よりこちらを使ってください。個別の送信操作は低レベルのままで、コマンドを送信しません。
+`pane send-text` と `pane run` は現在の bracketed paste モードを尊重するため、複数行のテキストはキー入力の再生ではなく 1 回のペーストとして TUI の入力欄に入ります。`pane run` はさらにテキストと Enter をアトミックに送信します。コマンドには `send-text` + `send-keys Enter` よりこちらを使ってください。個別の送信操作は低レベルのままで、コマンドを送信しません。
 
 カスタムフックからエージェント状態を報告する:
 

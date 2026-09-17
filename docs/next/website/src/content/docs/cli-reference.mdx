@@ -247,7 +247,7 @@ and `shift+tab`, function keys such as `f1`, and named punctuation such as
 aliases for `ctrl+c`.
 `esc` is the canonical spelling; `escape` is also accepted.
 
-`pane run` honors live bracketed-paste mode and submits text plus Enter atomically. Prefer it over `send-text` plus `send-keys Enter` for commands; the separate send operations remain low-level and non-submitting.
+`pane send-text` and `pane run` honor live bracketed-paste mode, so multi-line text lands in a TUI composer as one paste instead of a keystroke replay. `pane run` also submits text plus Enter atomically; prefer it over `send-text` plus `send-keys Enter` for commands, because the separate send operations remain low-level and non-submitting.
 
 Report agent state from custom hooks:
 
