@@ -1737,10 +1737,7 @@ next_tab = "prefix+n"
         let kb = Config::default().keybinds();
         assert_eq!(
             binding_triggers(&kb.previous_workspace),
-            vec![BindingTrigger::Prefix((
-                KeyCode::Left,
-                KeyModifiers::SHIFT
-            ))]
+            vec![BindingTrigger::Prefix((KeyCode::Left, KeyModifiers::SHIFT))]
         );
         assert_eq!(
             binding_triggers(&kb.next_workspace),

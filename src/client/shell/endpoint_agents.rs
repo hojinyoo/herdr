@@ -75,9 +75,8 @@ pub(super) fn render_expanded(
         hits,
         |row| row.agent.rows.len(),
         |buffer, rect, row, hits| {
-            let selected = selected_agent.is_some_and(|target| {
-                target.matches(&row.endpoint_id, &row.agent.pane_id)
-            });
+            let selected = selected_agent
+                .is_some_and(|target| target.matches(&row.endpoint_id, &row.agent.pane_id));
             super::agent_sidebar::render_agent_row(buffer, rect, &row.agent, config, selected);
             if row.stale {
                 buffer.set_style(

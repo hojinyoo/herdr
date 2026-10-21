@@ -274,10 +274,12 @@ impl ClientShellState {
                 self.config.agent_panel_sort,
             )
             .into_iter()
-            .map(|pane_id| super::aggregate_navigation::AggregateAgentTarget {
-                endpoint_id: self.active_endpoint_id.clone(),
-                pane_id,
-            })
+            .map(
+                |pane_id| super::aggregate_navigation::AggregateAgentTarget {
+                    endpoint_id: self.active_endpoint_id.clone(),
+                    pane_id,
+                },
+            )
             .collect();
         }
         super::aggregate_navigation::online_agent_targets(
@@ -306,8 +308,7 @@ impl ClientShellState {
             self.navigate_agent = None;
             return;
         };
-        let Some(target) =
-            self.agent_navigation_target(&selected.endpoint_id, &selected.pane_id)
+        let Some(target) = self.agent_navigation_target(&selected.endpoint_id, &selected.pane_id)
         else {
             self.navigate_agent = None;
             return;
@@ -370,8 +371,7 @@ impl ClientShellState {
             None => 0,
         };
         let selected = &agents[next];
-        let Some(target) =
-            self.agent_navigation_target(&selected.endpoint_id, &selected.pane_id)
+        let Some(target) = self.agent_navigation_target(&selected.endpoint_id, &selected.pane_id)
         else {
             return;
         };
@@ -392,8 +392,7 @@ impl ClientShellState {
         let Some(selected) = agents.get(index) else {
             return false;
         };
-        let Some(target) =
-            self.agent_navigation_target(&selected.endpoint_id, &selected.pane_id)
+        let Some(target) = self.agent_navigation_target(&selected.endpoint_id, &selected.pane_id)
         else {
             return false;
         };
