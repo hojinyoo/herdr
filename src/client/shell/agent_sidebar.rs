@@ -55,6 +55,8 @@ pub(super) fn render_agent_panel(
     snapshot: &ClientShellSnapshot,
     config: &ClientShellConfig,
     agent_scroll: &mut usize,
+    selected_pane_id: Option<&str>,
+    section_active: bool,
     hits: &mut ShellHitMap,
 ) {
     if !render_agent_panel_header(
@@ -62,6 +64,7 @@ pub(super) fn render_agent_panel(
         area,
         snapshot.agent_view_label.as_deref(),
         config,
+        section_active,
         hits,
     ) {
         return;
@@ -82,7 +85,13 @@ pub(super) fn render_agent_panel(
         |row| row.rows.len(),
         |buffer, rect, row, hits| {
             hits.agents.push((rect, row.pane_id.clone()));
-            render_agent_row(buffer, rect, row, config);
+            render_agent_row(
+                buffer,
+                rect,
+                row,
+                config,
+                selected_pane_id == Some(row.pane_id.as_str()),
+            );
         },
     );
 }
@@ -92,6 +101,7 @@ pub(super) fn render_agent_panel_header(
     area: Rect,
     agent_view_label: Option<&str>,
     config: &ClientShellConfig,
+    section_active: bool,
     hits: &mut ShellHitMap,
 ) -> bool {
     if area.height == 0 {
@@ -115,7 +125,11 @@ pub(super) fn render_agent_panel_header(
         area.width,
         " agents",
         Style::default()
-            .fg(config.palette.overlay0)
+            .fg(if section_active {
+                config.palette.accent
+            } else {
+                config.palette.overlay0
+            })
             .add_modifier(Modifier::BOLD),
     );
     let sort_label = agent_view_label.unwrap_or(match config.agent_panel_sort {
@@ -323,14 +337,17 @@ pub(super) fn render_agent_row(
     rect: Rect,
     row: &AgentRow,
     config: &ClientShellConfig,
+    selected: bool,
 ) {
     let palette = &config.palette;
-    let row_style = if row.focused {
+    let row_style = if selected {
+        Style::default().bg(super::sidebar::workspace_selection_background(palette))
+    } else if row.focused {
         Style::default().bg(palette.active_row_bg)
     } else {
         Style::default()
     };
-    let name_style = if row.focused {
+    let name_style = if selected || row.focused {
         Style::default()
             .fg(palette.text)
             .add_modifier(Modifier::BOLD)

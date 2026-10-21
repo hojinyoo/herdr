@@ -50,6 +50,8 @@ pub(super) fn render_expanded(
     active_endpoint_id: &ClientEndpointId,
     config: &ClientShellConfig,
     agent_scroll: &mut usize,
+    selected_agent: Option<&AgentNavigationTarget>,
+    section_active: bool,
     hits: &mut ShellHitMap,
 ) {
     if !super::agent_sidebar::render_agent_panel_header(
@@ -57,6 +59,7 @@ pub(super) fn render_expanded(
         area,
         agent_view_label,
         config,
+        section_active,
         hits,
     ) {
         return;
@@ -72,7 +75,9 @@ pub(super) fn render_expanded(
         hits,
         |row| row.agent.rows.len(),
         |buffer, rect, row, hits| {
-            super::agent_sidebar::render_agent_row(buffer, rect, &row.agent, config);
+            let selected = selected_agent
+                .is_some_and(|target| target.matches(&row.endpoint_id, &row.agent.pane_id));
+            super::agent_sidebar::render_agent_row(buffer, rect, &row.agent, config, selected);
             if row.stale {
                 buffer.set_style(
                     rect,

@@ -341,6 +341,8 @@ pub struct CustomCommandKeybind {
 pub struct NavigateKeybinds {
     pub workspace_up: ActionKeybinds,
     pub workspace_down: ActionKeybinds,
+    pub section_spaces: ActionKeybinds,
+    pub section_agents: ActionKeybinds,
     pub pane_left: ActionKeybinds,
     pub pane_down: ActionKeybinds,
     pub pane_up: ActionKeybinds,
@@ -529,6 +531,8 @@ impl Config {
             navigate: NavigateKeybinds {
                 workspace_up: empty_action!(),
                 workspace_down: empty_action!(),
+                section_spaces: empty_action!(),
+                section_agents: empty_action!(),
                 pane_left: empty_action!(),
                 pane_down: empty_action!(),
                 pane_up: empty_action!(),
@@ -657,6 +661,16 @@ impl Config {
             apply_navigate!(
                 keybinds.navigate.workspace_down,
                 navigate_workspace_down,
+                source
+            );
+            apply_navigate!(
+                keybinds.navigate.section_spaces,
+                navigate_section_spaces,
+                source
+            );
+            apply_navigate!(
+                keybinds.navigate.section_agents,
+                navigate_section_agents,
                 source
             );
             apply_navigate!(keybinds.navigate.pane_left, navigate_pane_left, source);
@@ -1707,9 +1721,73 @@ next_tab = "prefix+n"
     }
 
     #[test]
-    fn back_and_forth_keybinds_are_unset_by_default() {
+    fn last_pane_defaults_to_prefix_semicolon() {
         let kb = Config::default().keybinds();
-        assert!(kb.last_pane.bindings.is_empty());
+        assert_eq!(
+            binding_triggers(&kb.last_pane),
+            vec![BindingTrigger::Prefix((
+                KeyCode::Char(';'),
+                KeyModifiers::empty()
+            ))]
+        );
+    }
+
+    #[test]
+    fn sidebar_and_pane_navigation_defaults_parse() {
+        let kb = Config::default().keybinds();
+        assert_eq!(
+            binding_triggers(&kb.previous_workspace),
+            vec![BindingTrigger::Prefix((KeyCode::Left, KeyModifiers::SHIFT))]
+        );
+        assert_eq!(
+            binding_triggers(&kb.next_workspace),
+            vec![BindingTrigger::Prefix((
+                KeyCode::Right,
+                KeyModifiers::SHIFT
+            ))]
+        );
+        assert_eq!(
+            binding_triggers(&kb.previous_agent),
+            vec![BindingTrigger::Prefix((
+                KeyCode::Char(','),
+                KeyModifiers::empty()
+            ))]
+        );
+        assert_eq!(
+            binding_triggers(&kb.next_agent),
+            vec![BindingTrigger::Prefix((
+                KeyCode::Char('.'),
+                KeyModifiers::empty()
+            ))]
+        );
+        assert_eq!(kb.focus_agent.len(), 9);
+        assert!(kb.focus_agent.iter().all(|binding| {
+            matches!(
+                binding.trigger,
+                BindingTrigger::Prefix((_, modifiers)) if modifiers == KeyModifiers::ALT
+            )
+        }));
+        assert_eq!(kb.switch_workspace.len(), 9);
+        assert!(kb.switch_workspace.iter().all(|binding| {
+            matches!(
+                binding.trigger,
+                BindingTrigger::Prefix((_, modifiers)) if modifiers == KeyModifiers::SHIFT
+            )
+        }));
+        assert_eq!(
+            binding_triggers(&kb.navigate.section_spaces),
+            vec![BindingTrigger::Direct((
+                KeyCode::Char('s'),
+                KeyModifiers::empty()
+            ))]
+        );
+        assert_eq!(
+            binding_triggers(&kb.navigate.section_agents),
+            vec![BindingTrigger::Direct((
+                KeyCode::Char('a'),
+                KeyModifiers::empty()
+            ))]
+        );
     }
 
     #[test]

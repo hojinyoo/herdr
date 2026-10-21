@@ -253,6 +253,7 @@ pub(super) fn render_expanded(
         crate::ui::expanded_sidebar_sections(area, state.sidebar_section_split);
     hits.sidebar_section_divider =
         crate::ui::sidebar_section_divider_rect(area, state.sidebar_section_split);
+    let spaces_active = state.navigate_section == Some(NavigateSidebarSection::Spaces);
     put_text(
         buffer,
         workspace_area.x,
@@ -260,7 +261,11 @@ pub(super) fn render_expanded(
         workspace_area.width,
         " machines",
         Style::default()
-            .fg(palette.overlay0)
+            .fg(if spaces_active {
+                palette.accent
+            } else {
+                palette.overlay0
+            })
             .add_modifier(Modifier::BOLD),
     );
 
@@ -561,6 +566,10 @@ pub(super) fn render_expanded(
         state.active_endpoint_id,
         config,
         state.agent_scroll,
+        state
+            .selected_agent
+            .filter(|_| state.navigate_section == Some(NavigateSidebarSection::Agents)),
+        state.navigate_section == Some(NavigateSidebarSection::Agents),
         hits,
     );
     hits.sidebar_toggle = Rect::new(

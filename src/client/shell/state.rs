@@ -900,7 +900,9 @@ pub(crate) struct ClientShellState {
     pub(super) active_endpoint_id: ClientEndpointId,
     pub(super) collapsed_endpoints: HashSet<ClientEndpointId>,
     pub(super) mode: ClientShellMode,
+    pub(super) navigate_section: NavigateSidebarSection,
     pub(super) navigate_workspace_id: Option<WorkspaceNavigationTarget>,
+    pub(super) navigate_agent: Option<AgentNavigationTarget>,
     pub(super) pending_workspace_highlight: Option<PendingWorkspaceHighlight>,
     pub(super) reveal_navigation_workspace: bool,
     pub(super) overlay: Option<ClientShellOverlay>,
@@ -1074,7 +1076,9 @@ impl ClientShellState {
             active_endpoint_id: ClientEndpointId::Local,
             collapsed_endpoints: HashSet::new(),
             mode: ClientShellMode::Terminal,
+            navigate_section: NavigateSidebarSection::Spaces,
             navigate_workspace_id: None,
+            navigate_agent: None,
             pending_workspace_highlight: None,
             reveal_navigation_workspace: false,
             overlay,
@@ -1141,10 +1145,11 @@ impl ClientShellState {
             .and_then(|snapshot| snapshot.focused_workspace_id.as_ref())
             .is_some()
         {
-            self.mode = self.copy_or_terminal_mode();
-            self.navigate_workspace_id = None;
+            self.leave_navigate_mode();
         } else {
             self.mode = ClientShellMode::Navigate;
+            self.navigate_section = NavigateSidebarSection::Spaces;
+            self.navigate_agent = None;
         }
         true
     }
@@ -1268,7 +1273,9 @@ impl ClientShellState {
         self.visible_endpoint_notice = None;
         self.endpoint_error = None;
         self.endpoint_error_deadline = None;
+        self.navigate_section = NavigateSidebarSection::Spaces;
         self.navigate_workspace_id = None;
+        self.navigate_agent = None;
         self.pending_workspace_highlight = None;
         self.overlay = self
             .config
@@ -1677,7 +1684,7 @@ impl ClientShellState {
                     .remove_target(&ClientInputTarget::Popup(terminal_id.clone()));
             }
             self.mode = ClientShellMode::Terminal;
-            self.navigate_workspace_id = None;
+            self.clear_navigate_selection();
             if !matches!(
                 self.overlay.as_ref(),
                 Some(ClientShellOverlay::Onboarding | ClientShellOverlay::ProductAnnouncement(_))

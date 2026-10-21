@@ -689,8 +689,7 @@ impl ClientShellState {
             && !self.mobile_layout_active()
             && mouse.kind == MouseEventKind::Down(MouseButton::Left)
         {
-            self.mode = self.copy_or_terminal_mode();
-            self.navigate_workspace_id = None;
+            self.leave_navigate_mode();
             outcome.repaint = true;
         }
         if matches!(self.overlay, Some(ClientShellOverlay::Onboarding)) {

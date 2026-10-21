@@ -36,10 +36,17 @@ impl ClientShellState {
             Rect::new(0, 1, cols, rows.saturating_sub(2))
         };
         let valid_navigation_target = self.mode == ClientShellMode::Navigate
+            && self.navigate_section == NavigateSidebarSection::Spaces
             && self
                 .navigate_workspace_id
                 .as_ref()
                 .is_some_and(|target| self.navigation_target_valid(target));
+        let valid_agent_navigation_target = self.mode == ClientShellMode::Navigate
+            && self.navigate_section == NavigateSidebarSection::Agents
+            && self
+                .navigate_agent
+                .as_ref()
+                .is_some_and(|target| self.agent_navigation_target_valid(target));
         let pending_workspace_highlight =
             self.pending_workspace_highlight.as_ref().filter(|pending| {
                 self.mode != ClientShellMode::Navigate
@@ -74,6 +81,12 @@ impl ClientShellState {
                 .as_ref()
                 .filter(|_| valid_navigation_target)
                 .or_else(|| pending_workspace_highlight.map(|pending| &pending.target)),
+            selected_agent: self
+                .navigate_agent
+                .as_ref()
+                .filter(|_| valid_agent_navigation_target),
+            navigate_section: (self.mode == ClientShellMode::Navigate)
+                .then_some(self.navigate_section),
             reveal_navigation_workspace: &mut self.reveal_navigation_workspace,
             dragged_workspace_id: None,
             workspace_drop_indicator_row: None,
@@ -160,10 +173,17 @@ impl ClientShellState {
         }
         self.last_composed_size = Some((cols, rows));
         let valid_navigation_target = self.mode == ClientShellMode::Navigate
+            && self.navigate_section == NavigateSidebarSection::Spaces
             && self
                 .navigate_workspace_id
                 .as_ref()
                 .is_some_and(|target| self.navigation_target_valid(target));
+        let valid_agent_navigation_target = self.mode == ClientShellMode::Navigate
+            && self.navigate_section == NavigateSidebarSection::Agents
+            && self
+                .navigate_agent
+                .as_ref()
+                .is_some_and(|target| self.agent_navigation_target_valid(target));
         let pending_workspace_highlight =
             self.pending_workspace_highlight.as_ref().filter(|pending| {
                 self.mode != ClientShellMode::Navigate
@@ -230,6 +250,12 @@ impl ClientShellState {
                     .as_ref()
                     .filter(|_| valid_navigation_target)
                     .or_else(|| pending_workspace_highlight.map(|pending| &pending.target)),
+                selected_agent: self
+                    .navigate_agent
+                    .as_ref()
+                    .filter(|_| valid_agent_navigation_target),
+                navigate_section: (self.mode == ClientShellMode::Navigate)
+                    .then_some(self.navigate_section),
                 reveal_navigation_workspace: &mut self.reveal_navigation_workspace,
                 dragged_workspace_id,
                 workspace_drop_indicator_row,

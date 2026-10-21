@@ -965,7 +965,9 @@ impl ClientShellState {
                 self.reveal_mobile_workspace = false;
                 self.pending_workspace_highlight = None;
                 self.mode = ClientShellMode::Navigate;
+                self.navigate_section = NavigateSidebarSection::Spaces;
                 self.navigate_workspace_id = self.focused_navigation_target();
+                self.navigate_agent = None;
                 outcome.repaint = true;
                 return true;
             }
@@ -992,7 +994,7 @@ impl ClientShellState {
 
         if super::contains(self.hits.mobile_close, point) {
             self.mode = ClientShellMode::Terminal;
-            self.navigate_workspace_id = None;
+            self.clear_navigate_selection();
             outcome.repaint = true;
             return true;
         }
@@ -1006,13 +1008,13 @@ impl ClientShellState {
             Some(ClientMobileTarget::Machine(endpoint_id)) => {
                 if endpoint_id == self.active_endpoint_id {
                     self.mode = ClientShellMode::Terminal;
-                    self.navigate_workspace_id = None;
+                    self.clear_navigate_selection();
                     if endpoint_id.is_local() {
                         self.activate_endpoint(endpoint_id, outcome);
                     }
                 } else if self.activate_endpoint(endpoint_id, outcome) {
                     self.mode = ClientShellMode::Terminal;
-                    self.navigate_workspace_id = None;
+                    self.clear_navigate_selection();
                 }
             }
             Some(ClientMobileTarget::NewWorkspace) => {
@@ -1032,7 +1034,7 @@ impl ClientShellState {
                     outcome,
                 ) {
                     self.mode = ClientShellMode::Terminal;
-                    self.navigate_workspace_id = None;
+                    self.clear_navigate_selection();
                 }
             }
             Some(ClientMobileTarget::Agent {
@@ -1045,7 +1047,7 @@ impl ClientShellState {
                     outcome,
                 ) {
                     self.mode = ClientShellMode::Terminal;
-                    self.navigate_workspace_id = None;
+                    self.clear_navigate_selection();
                 }
             }
             Some(ClientMobileTarget::Tab {
@@ -1058,7 +1060,7 @@ impl ClientShellState {
                     outcome,
                 ) {
                     self.mode = ClientShellMode::Terminal;
-                    self.navigate_workspace_id = None;
+                    self.clear_navigate_selection();
                 }
             }
             Some(ClientMobileTarget::NewTab) => {

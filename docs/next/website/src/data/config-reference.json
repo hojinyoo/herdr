@@ -560,6 +560,18 @@
           "description": "Move workspace selection down in navigate mode."
         },
         {
+          "key": "keys.navigate_section_spaces",
+          "type": "keybinding",
+          "default": "\"s\"",
+          "description": "Focus the spaces list in navigate mode."
+        },
+        {
+          "key": "keys.navigate_section_agents",
+          "type": "keybinding",
+          "default": "\"a\"",
+          "description": "Focus the agents list in navigate mode."
+        },
+        {
           "key": "keys.navigate_pane_left",
           "type": "keybinding",
           "default": "\"h\"",
@@ -604,32 +616,32 @@
         {
           "key": "keys.previous_workspace",
           "type": "keybinding",
-          "default": "unset",
-          "description": "Select the previous workspace. Unset by default."
+          "default": "\"prefix+shift+left\"",
+          "description": "Select the previous workspace."
         },
         {
           "key": "keys.next_workspace",
           "type": "keybinding",
-          "default": "unset",
-          "description": "Select the next workspace. Unset by default."
+          "default": "\"prefix+shift+right\"",
+          "description": "Select the next workspace."
         },
         {
           "key": "keys.previous_agent",
           "type": "keybinding",
-          "default": "unset",
-          "description": "Focus the previous agent shown in the agent panel. Unset by default."
+          "default": "\"prefix+comma\"",
+          "description": "Focus the previous agent shown in the agent panel."
         },
         {
           "key": "keys.next_agent",
           "type": "keybinding",
-          "default": "unset",
-          "description": "Focus the next agent shown in the agent panel. Unset by default."
+          "default": "\"prefix+period\"",
+          "description": "Focus the next agent shown in the agent panel."
         },
         {
           "key": "keys.focus_agent",
           "type": "keybinding",
-          "default": "unset",
-          "description": "Focus an agent by index 1-9. Unset by default."
+          "default": "\"prefix+alt+1..9\"",
+          "description": "Focus an agent by index 1-9."
         },
         {
           "key": "keys.remote_image_paste",
@@ -682,8 +694,8 @@
         {
           "key": "keys.switch_workspace",
           "type": "keybinding",
-          "default": "unset",
-          "description": "Switch to workspace 1-9 from prefix mode. Unset by default."
+          "default": "\"prefix+shift+1..9\"",
+          "description": "Switch to workspace 1-9 from prefix mode."
         },
         {
           "key": "keys.close_tab",
@@ -778,8 +790,8 @@
         {
           "key": "keys.last_pane",
           "type": "keybinding",
-          "default": "unset",
-          "description": "Focus the last focused pane across workspaces and tabs. Unset by default."
+          "default": "\"prefix+semicolon\"",
+          "description": "Focus the last focused pane across workspaces and tabs."
         },
         {
           "key": "keys.split_vertical",

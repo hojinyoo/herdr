@@ -759,10 +759,38 @@ impl ClientShellState {
             .keybinds
             .keybinds
             .navigate
+            .section_spaces
+            .matches_direct_key(key)
+        {
+            self.set_navigate_section(NavigateSidebarSection::Spaces);
+            outcome.repaint = true;
+            return;
+        }
+        if self
+            .config
+            .keybinds
+            .keybinds
+            .navigate
+            .section_agents
+            .matches_direct_key(key)
+        {
+            self.set_navigate_section(NavigateSidebarSection::Agents);
+            outcome.repaint = true;
+            return;
+        }
+
+        if self
+            .config
+            .keybinds
+            .keybinds
+            .navigate
             .workspace_up
             .matches_direct_key(key)
         {
-            self.move_navigate_workspace(-1);
+            match self.navigate_section {
+                NavigateSidebarSection::Spaces => self.move_navigate_workspace(-1),
+                NavigateSidebarSection::Agents => self.move_navigate_agent(-1),
+            }
             outcome.repaint = true;
             return;
         }
@@ -774,17 +802,25 @@ impl ClientShellState {
             .workspace_down
             .matches_direct_key(key)
         {
-            self.move_navigate_workspace(1);
+            match self.navigate_section {
+                NavigateSidebarSection::Spaces => self.move_navigate_workspace(1),
+                NavigateSidebarSection::Agents => self.move_navigate_agent(1),
+            }
             outcome.repaint = true;
             return;
         }
 
         let (code, modifiers) = crate::config::normalize_key_combo((key.code, key.modifiers));
         if code == KeyCode::Enter && modifiers.is_empty() {
-            self.accept_navigate_workspace(outcome);
+            match self.navigate_section {
+                NavigateSidebarSection::Spaces => self.accept_navigate_workspace(outcome),
+                NavigateSidebarSection::Agents => self.accept_navigate_agent(outcome),
+            }
             return;
         }
-        if self.workspace_preview_action_blocked() {
+        if self.navigate_section == NavigateSidebarSection::Spaces
+            && self.workspace_preview_action_blocked()
+        {
             // Bindings cannot run against a foreign preview, so Ctrl+[ has
             // nothing to lose to and cancels here the same way Esc does.
             if is_ctrl_bracket_key(key) {
@@ -807,19 +843,28 @@ impl ClientShellState {
                 (KeyCode::Char(digit), KeyModifiers::empty()),
             )
         }) {
-            let valid = self.snapshot.as_deref().is_some_and(|snapshot| {
-                self.navigation_workspace_entries(snapshot)
-                    .get(index)
-                    .is_some()
-            });
-            if valid {
-                self.mode = ClientShellMode::Terminal;
-                self.navigate_workspace_id = None;
-                self.record_binding(
-                    KeybindMatch::Action(KeybindAction::SwitchWorkspace(index)),
-                    outcome,
-                );
-                outcome.repaint = true;
+            match self.navigate_section {
+                NavigateSidebarSection::Spaces => {
+                    let valid = self.snapshot.as_deref().is_some_and(|snapshot| {
+                        self.navigation_workspace_entries(snapshot)
+                            .get(index)
+                            .is_some()
+                    });
+                    if valid {
+                        self.mode = ClientShellMode::Terminal;
+                        self.clear_navigate_selection();
+                        self.record_binding(
+                            KeybindMatch::Action(KeybindAction::SwitchWorkspace(index)),
+                            outcome,
+                        );
+                        outcome.repaint = true;
+                    }
+                }
+                NavigateSidebarSection::Agents => {
+                    if self.focus_navigate_agent_at(index, outcome) {
+                        outcome.repaint = true;
+                    }
+                }
             }
             return;
         }
@@ -926,8 +971,7 @@ impl ClientShellState {
     }
 
     fn cancel_navigate(&mut self, outcome: &mut ClientShellInput) {
-        self.mode = self.copy_or_terminal_mode();
-        self.navigate_workspace_id = None;
+        self.leave_navigate_mode();
         outcome.repaint = true;
     }
 
@@ -956,7 +1000,7 @@ impl ClientShellState {
             if self.mode == ClientShellMode::Navigate {
                 self.mode = self.copy_or_terminal_mode();
             }
-            self.navigate_workspace_id = None;
+            self.clear_navigate_selection();
         }
         outcome.repaint = true;
     }
