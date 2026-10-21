@@ -1026,3 +1026,144 @@ fn kitty_ctrl_bracket_cancels_a_blocked_foreign_preview() {
     assert_ne!(state.mode, ClientShellMode::Navigate);
     assert!(state.navigate_workspace_id.is_none());
 }
+
+fn agents_snapshot() -> ClientShellSnapshot {
+    let mut projected = workspaces(2);
+    let mut second_pane = projected.panes[0].clone();
+    second_pane.pane_id = "pane_2".into();
+    second_pane.focused = false;
+    projected.panes.push(second_pane);
+    projected.agents = vec![
+        ClientShellAgent {
+            pane_id: "pane_1".into(),
+            workspace_id: "ws_1".into(),
+            tab_id: "tab_1".into(),
+            name: Some("first".into()),
+            display_agent: None,
+            agent: None,
+            title: None,
+            terminal_title: None,
+            terminal_title_stripped: None,
+            agent_status: AgentStatus::Idle,
+            state_change_seq: 1,
+            state_labels: Vec::new(),
+            tokens: Vec::new(),
+            focused: true,
+        },
+        ClientShellAgent {
+            pane_id: "pane_2".into(),
+            workspace_id: "ws_1".into(),
+            tab_id: "tab_1".into(),
+            name: Some("second".into()),
+            display_agent: None,
+            agent: None,
+            title: None,
+            terminal_title: None,
+            terminal_title_stripped: None,
+            agent_status: AgentStatus::Working,
+            state_change_seq: 2,
+            state_labels: Vec::new(),
+            tokens: Vec::new(),
+            focused: false,
+        },
+    ];
+    projected
+}
+
+#[test]
+fn navigate_section_switches_between_spaces_and_agents() {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(agents_snapshot()));
+    state.set_pane_surface(surface());
+    state.compose(100, 28).unwrap();
+    enter_navigation(&mut state);
+    assert_eq!(state.navigate_section, NavigateSidebarSection::Spaces);
+    assert_selected(&state, &ClientEndpointId::Local, "ws_1");
+
+    preview_key(&mut state, b"a");
+    assert_eq!(state.navigate_section, NavigateSidebarSection::Agents);
+    assert_eq!(
+        state.navigate_agent,
+        state.agent_navigation_target(&ClientEndpointId::Local, "pane_1")
+    );
+    assert_selected(&state, &ClientEndpointId::Local, "ws_1");
+
+    preview_key(&mut state, b"\x1b[B");
+    assert_eq!(
+        state.navigate_agent,
+        state.agent_navigation_target(&ClientEndpointId::Local, "pane_2")
+    );
+
+    preview_key(&mut state, b"\x1b[A");
+    assert_eq!(
+        state.navigate_agent,
+        state.agent_navigation_target(&ClientEndpointId::Local, "pane_1")
+    );
+
+    preview_key(&mut state, b"s");
+    assert_eq!(state.navigate_section, NavigateSidebarSection::Spaces);
+    assert_eq!(
+        state.navigate_agent,
+        state.agent_navigation_target(&ClientEndpointId::Local, "pane_1")
+    );
+
+    preview_key(&mut state, b"a");
+    let enter = state.handle_input_bytes(b"\r");
+    assert!(enter.requests.is_empty());
+    assert!(matches!(
+        enter.actions.as_slice(),
+        [ClientShellAction::Endpoint { request, .. }]
+            if matches!(&request.method, crate::api::schema::Method::PaneFocus(target) if target.pane_id == "pane_1")
+    ));
+    assert_eq!(state.mode, ClientShellMode::Terminal);
+    assert!(state.navigate_agent.is_none());
+    assert_eq!(state.navigate_section, NavigateSidebarSection::Spaces);
+}
+
+#[test]
+fn navigate_agents_digit_focuses_visible_agent_and_esc_clears() {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(agents_snapshot()));
+    state.set_pane_surface(surface());
+    state.compose(100, 28).unwrap();
+    enter_navigation(&mut state);
+
+    preview_key(&mut state, b"a");
+    assert_eq!(state.navigate_section, NavigateSidebarSection::Agents);
+
+    let digit = state.handle_input_bytes(b"2");
+    assert!(matches!(
+        digit.actions.as_slice(),
+        [ClientShellAction::Endpoint { request, .. }]
+            if matches!(&request.method, crate::api::schema::Method::PaneFocus(target) if target.pane_id == "pane_2")
+    ));
+    assert_eq!(state.mode, ClientShellMode::Terminal);
+    assert!(state.navigate_agent.is_none());
+    assert_eq!(state.navigate_section, NavigateSidebarSection::Spaces);
+
+    enter_navigation(&mut state);
+    preview_key(&mut state, b"a");
+    assert!(state.navigate_agent.is_some());
+    preview_key(&mut state, b"\x1b");
+    assert_eq!(state.mode, ClientShellMode::Terminal);
+    assert!(state.navigate_agent.is_none());
+    assert_eq!(state.navigate_section, NavigateSidebarSection::Spaces);
+}
+
+#[test]
+fn navigate_agents_empty_list_enter_exits_without_focus() {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    let mut snapshot = agents_snapshot();
+    snapshot.agents.clear();
+    snapshot.agent_order.clear();
+    state.set_snapshot(Box::new(snapshot));
+    state.set_pane_surface(surface());
+    state.compose(100, 28).unwrap();
+    enter_navigation(&mut state);
+    preview_key(&mut state, b"a");
+    assert!(state.navigate_agent.is_none());
+    let enter = state.handle_input_bytes(b"\r");
+    assert!(enter.actions.is_empty());
+    assert_eq!(state.mode, ClientShellMode::Terminal);
+    assert_eq!(state.navigate_section, NavigateSidebarSection::Spaces);
+}

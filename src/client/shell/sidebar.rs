@@ -4,7 +4,9 @@ use ratatui::{
     widgets::{Paragraph, Widget},
 };
 
-fn workspace_selection_background(palette: &Palette) -> ratatui::style::Color {
+pub(in crate::client::shell) fn workspace_selection_background(
+    palette: &Palette,
+) -> ratatui::style::Color {
     if palette.selection_bg == ratatui::style::Color::Reset {
         palette.active_row_bg
     } else {
@@ -215,6 +217,7 @@ pub(crate) fn render_sidebar(
         crate::ui::expanded_sidebar_sections(area, state.sidebar_section_split);
     hits.sidebar_section_divider =
         crate::ui::sidebar_section_divider_rect(area, state.sidebar_section_split);
+    let spaces_active = state.navigate_section == Some(NavigateSidebarSection::Spaces);
     put_text(
         buffer,
         workspace_area.x,
@@ -222,7 +225,11 @@ pub(crate) fn render_sidebar(
         workspace_area.width,
         " spaces",
         Style::default()
-            .fg(palette.overlay0)
+            .fg(if spaces_active {
+                palette.accent
+            } else {
+                palette.overlay0
+            })
             .add_modifier(Modifier::BOLD),
     );
 
@@ -436,6 +443,11 @@ pub(crate) fn render_sidebar(
         snapshot,
         config,
         state.agent_scroll,
+        state
+            .selected_agent
+            .filter(|_| state.navigate_section == Some(NavigateSidebarSection::Agents))
+            .map(|target| target.pane_id.as_str()),
+        state.navigate_section == Some(NavigateSidebarSection::Agents),
         hits,
     );
 
