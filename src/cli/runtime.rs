@@ -90,6 +90,13 @@ pub(super) fn pane_focus(params: PaneFocusDirectionParams) -> std::io::Result<i3
     print_method_response("cli:pane:focus", Method::PaneFocusDirection(params))
 }
 
+pub(super) fn pane_focus_target(pane_id: String) -> std::io::Result<i32> {
+    print_method_response(
+        "cli:pane:focus",
+        Method::PaneFocus(PaneTarget { pane_id }),
+    )
+}
+
 pub(super) fn pane_resize(params: PaneResizeParams) -> std::io::Result<i32> {
     print_method_response("cli:pane:resize", Method::PaneResize(params))
 }

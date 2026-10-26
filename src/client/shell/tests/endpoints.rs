@@ -174,6 +174,60 @@ fn workspace_navigation_waits_for_the_target_presentation_fence() {
     }
 }
 
+#[cfg(any(windows, target_os = "macos"))]
+#[test]
+fn system_notification_effects_keep_pane_target() {
+    let (mut state, remote) = state_with_remote();
+    state.config.toast_delivery = crate::config::ToastDelivery::System;
+    state.config.toast_delay_seconds = 0;
+    state.outer_focused = Some(false);
+    for endpoint_id in [ClientEndpointId::Local, remote] {
+        let (effects, _) = state.receive_notification(
+            &endpoint_id,
+            SemanticNotification {
+                kind: SemanticNotificationKind::Custom,
+                title: "pi finished".into(),
+                body: Some("workspace".into()),
+                sound: None,
+                agent: Some("pi".into()),
+                workspace_id: Some("ws_1".into()),
+                tab_id: Some("tab_1".into()),
+                pane_id: Some("pane_1".into()),
+                position: None,
+            },
+            std::time::Instant::now(),
+        );
+        let [ClientShellNotificationEffect::System {
+            target: Some(target),
+            ..
+        }] = effects.as_slice()
+        else {
+            panic!("system effect must retain notification target");
+        };
+        assert_eq!(target.endpoint_id, endpoint_id);
+        assert_eq!(target.pane_id, "pane_1");
+    }
+
+    let (effects, _) = state.receive_notification(
+        &ClientEndpointId::Local,
+        SemanticNotification {
+            kind: SemanticNotificationKind::UpdateInstalled,
+            title: "update available".into(),
+            body: None,
+            sound: None,
+            agent: None,
+            workspace_id: None,
+            tab_id: None,
+            pane_id: None,
+            position: None,
+        },
+        std::time::Instant::now(),
+    );
+    let [ClientShellNotificationEffect::System { target: None, .. }] = effects.as_slice() else {
+        panic!("update toast must omit pane focus target");
+    };
+}
+
 #[cfg(windows)]
 #[test]
 fn system_notification_clicks_keep_endpoint_and_boot_identity() {

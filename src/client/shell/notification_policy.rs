@@ -229,7 +229,7 @@ impl ClientShellState {
                     });
                 }
                 crate::config::ToastDelivery::System if !suppress_external => {
-                    #[cfg(windows)]
+                    #[cfg(any(windows, target_os = "macos"))]
                     let target = pending.event.pane_id.as_ref().and_then(|pane_id| {
                         self.endpoint_boot_id(&pending.endpoint_id).map(|boot_id| {
                             ClientSystemNotificationTarget {
@@ -242,7 +242,7 @@ impl ClientShellState {
                     effects.push(ClientShellNotificationEffect::System {
                         title: pending.event.title,
                         body: pending.event.body,
-                        #[cfg(windows)]
+                        #[cfg(any(windows, target_os = "macos"))]
                         target,
                     });
                 }
