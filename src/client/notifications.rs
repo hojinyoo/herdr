@@ -71,12 +71,14 @@ pub(super) fn handle_shell_notification_effects(
             shell::ClientShellNotificationEffect::System {
                 title,
                 body,
-                #[cfg(windows)]
+                #[cfg(any(windows, target_os = "macos"))]
                 target,
             } => {
                 #[cfg(windows)]
                 let result = show_system_notification(&title, body.as_deref(), target, event_tx);
-                #[cfg(not(windows))]
+                #[cfg(target_os = "macos")]
+                let result = show_macos_system_notification(&title, body.as_deref(), target);
+                #[cfg(not(any(windows, target_os = "macos")))]
                 let result = crate::platform::show_desktop_notification(&title, body.as_deref());
                 if let Err(err) = result {
                     warn!(err = %err, "failed to emit system notification");
@@ -84,6 +86,29 @@ pub(super) fn handle_shell_notification_effects(
             }
         }
     }
+}
+
+#[cfg(target_os = "macos")]
+fn show_macos_system_notification(
+    title: &str,
+    body: Option<&str>,
+    target: Option<shell::ClientSystemNotificationTarget>,
+) -> io::Result<bool> {
+    let focus = target.and_then(|target| match target.endpoint_id {
+        crate::client::endpoint::ClientEndpointId::Local => {
+            Some(crate::platform::DesktopNotificationFocus::LocalApi {
+                socket_path: crate::api::socket_path(),
+                pane_id: target.pane_id,
+            })
+        }
+        crate::client::endpoint::ClientEndpointId::Ssh(profile_id) => {
+            Some(crate::platform::DesktopNotificationFocus::Machine {
+                profile_id: profile_id.to_string(),
+                pane_id: target.pane_id,
+            })
+        }
+    });
+    crate::platform::show_desktop_notification_with_focus(title, body, focus.as_ref())
 }
 
 #[cfg(windows)]

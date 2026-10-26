@@ -199,15 +199,14 @@ fn pane_neighbor(args: &[String]) -> std::io::Result<i32> {
 }
 
 fn pane_focus(args: &[String]) -> std::io::Result<i32> {
-    let params = match parse_pane_focus_args(args) {
-        Ok(params) => params,
+    match parse_pane_focus_args(args) {
+        Ok(ParsedPaneFocus::ById(pane_id)) => super::runtime::pane_focus_target(pane_id),
+        Ok(ParsedPaneFocus::Direction(params)) => super::runtime::pane_focus(params),
         Err(message) => {
             eprintln!("{message}");
-            return Ok(2);
+            Ok(2)
         }
-    };
-
-    super::runtime::pane_focus(params)
+    }
 }
 
 fn pane_resize(args: &[String]) -> std::io::Result<i32> {
@@ -291,14 +290,21 @@ fn parse_pane_neighbor_args(args: &[String]) -> Result<PaneNeighborParams, Strin
     Ok(PaneNeighborParams { pane_id, direction })
 }
 
-fn parse_pane_focus_args(args: &[String]) -> Result<PaneFocusDirectionParams, String> {
-    let params = parse_pane_neighbor_args(args).map_err(|_| {
-        "usage: herdr pane focus --direction left|right|up|down [--pane ID|--current]".to_string()
-    })?;
-    Ok(PaneFocusDirectionParams {
+enum ParsedPaneFocus {
+    ById(String),
+    Direction(PaneFocusDirectionParams),
+}
+
+fn parse_pane_focus_args(args: &[String]) -> Result<ParsedPaneFocus, String> {
+    const USAGE: &str = "usage: herdr pane focus <pane_id>\n       herdr pane focus --direction left|right|up|down [--pane ID|--current]";
+    if args.len() == 1 && !args[0].starts_with('-') {
+        return Ok(ParsedPaneFocus::ById(super::normalize_pane_id(&args[0])));
+    }
+    let params = parse_pane_neighbor_args(args).map_err(|_| USAGE.to_string())?;
+    Ok(ParsedPaneFocus::Direction(PaneFocusDirectionParams {
         pane_id: params.pane_id,
         direction: params.direction,
-    })
+    }))
 }
 
 fn parse_pane_resize_args(args: &[String]) -> Result<PaneResizeParams, String> {
@@ -1678,6 +1684,7 @@ fn print_pane_help() {
     eprintln!("  herdr pane process-info [--pane ID|--current]");
     eprintln!("  herdr pane neighbor --direction left|right|up|down [--pane ID|--current]");
     eprintln!("  herdr pane edges [--pane ID|--current]");
+    eprintln!("  herdr pane focus <pane_id>");
     eprintln!("  herdr pane focus --direction left|right|up|down [--pane ID|--current]");
     eprintln!(
         "  herdr pane resize --direction left|right|up|down [--amount FLOAT] [--pane ID|--current]"
@@ -2011,10 +2018,25 @@ mod tests {
 
     #[test]
     fn parse_pane_focus_args_accepts_directional_current() {
-        let params = parse_pane_focus_args(&args(&["--direction", "up"])).unwrap();
+        let ParsedPaneFocus::Direction(params) =
+            parse_pane_focus_args(&args(&["--direction", "up"])).unwrap()
+        else {
+            panic!("expected directional focus");
+        };
 
         assert_eq!(params.pane_id, None);
         assert_eq!(params.direction, PaneDirection::Up);
+    }
+
+    #[test]
+    fn parse_pane_focus_args_accepts_pane_id() {
+        let ParsedPaneFocus::ById(pane_id) =
+            parse_pane_focus_args(&args(&["w1:p2"])).unwrap()
+        else {
+            panic!("expected pane id focus");
+        };
+
+        assert_eq!(pane_id, "w1:p2");
     }
 
     #[test]
