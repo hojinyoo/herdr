@@ -204,7 +204,11 @@ pub fn pin_legacy_socket_for_handoff() {
     }
     let name = active_name();
     let legacy = legacy_data_dir_for(name.as_deref()).join("herdr.sock");
-    if api_socket_path_for(name.as_deref()) == legacy {
+    // Without a separate runtime dir nothing moves, and pinning would mask a
+    // `HERDR_CLIENT_SOCKET_PATH` override.
+    if legacy != data_dir_for(name.as_deref()).join("herdr.sock")
+        && api_socket_path_for(name.as_deref()) == legacy
+    {
         tracing::info!(socket = %legacy.display(), "handoff keeps the legacy socket path");
         std::env::set_var(crate::api::SOCKET_PATH_ENV_VAR, legacy);
     }
@@ -1328,6 +1332,24 @@ mod tests {
             crate::config::config_dir().join("herdr-client.sock")
         );
         std::env::remove_var(crate::api::SOCKET_PATH_ENV_VAR);
+        clear_split_roots(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn handoff_without_a_separate_runtime_dir_pins_nothing() {
+        let _guard = env_lock().lock().unwrap();
+        let root = set_split_roots("handoff-no-pin");
+        std::env::set_var("XDG_STATE_HOME", root.join("config"));
+        let socket = crate::config::config_dir().join("herdr.sock");
+        assert_eq!(socket, data_dir_for(None).join("herdr.sock"));
+        std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+
+        pin_legacy_socket_for_handoff();
+        drop(listener);
+
+        assert!(std::env::var_os(crate::api::SOCKET_PATH_ENV_VAR).is_none());
         clear_split_roots(&root);
     }
 
