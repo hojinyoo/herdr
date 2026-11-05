@@ -595,16 +595,30 @@ Windows でのサポートは現時点で韓国語 IME に限定されていま�
 | `HERDR_LOG` | ログフィルタリングを設定する。例: `HERDR_LOG=herdr=debug`。 |
 | `HERDR_DISABLE_SOUND` | `[ui.sound] enabled = true` でも音の再生を無効にする。 |
 
+## ランタイム状態
+
+Herdr はソケット、保存済みセッション、ログを設定とは別のランタイム状態ディレクトリに置きます。NFS などでホームディレクトリを共有するホスト同士でも、ソケットや保存済みセッションは共有されません。
+
+```text
+Linux:    ~/.local/state/herdr/hosts/<hostname>/
+macOS:    ~/.local/state/herdr/
+Windows:  %LOCALAPPDATA%\herdr\
+```
+
+名前付きセッションはその下の `sessions/<name>/` に入ります。ディレクトリを自分で決めるには `XDG_STATE_HOME` を設定します。その場合 Herdr はホスト名を付けずに `$XDG_STATE_HOME/herdr/` を使うので、ホストごとに別の値を設定してください。
+
+Herdr 0.9.4 以前はこの状態を設定ディレクトリに置いていました。それらのバージョンで起動したサーバーは、ライブハンドオフ後も再起動するまでソケットをそこに置き続け、新しい CLI からも接続できます。新しいサーバーが初めてコールドスタートすると、古い `session.json` と `session-history.json` を引き継ぎ、バックアップとして `session.json.adopted-by-<hostname>` を残します。設定ディレクトリを共有するホストでは、最初に起動したホストだけが古いセッションを引き継ぎます。古いログとスナップショットは元の場所に残ります。
+
 ## ログ
 
 ログは、起動時の警告、インテグレーションの状態、ソケット API の挙動を診断するときに役立ちます。
 
-主なログファイル:
+主なログファイル ([ランタイム状態ディレクトリ](#runtime-state) 内):
 
 ```text
-~/.config/herdr/herdr.log
-~/.config/herdr/herdr-client.log
-~/.config/herdr/herdr-server.log
+herdr.log
+herdr-client.log
+herdr-server.log
 ```
 
 ログは自動的にローテーションされます。問題を報告するときは、現在のログとローテーションされた関連ファイルを含めてください。

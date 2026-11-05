@@ -1234,6 +1234,12 @@ fn process_session_id(pid: u32) -> Option<i32> {
     fields.get(3)?.parse().ok()
 }
 
+/// Host segment for per-host runtime state. A Linux `$HOME` is often shared
+/// between hosts over NFS, and its hostname is stable across reboots.
+pub(crate) fn node_state_name() -> Option<String> {
+    hostname()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

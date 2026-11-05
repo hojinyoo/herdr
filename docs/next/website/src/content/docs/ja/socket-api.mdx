@@ -494,13 +494,13 @@ JSON のデコードまで到達したリクエスト行では、メソッドや
 
 ## ソケットパス
 
-デフォルトのソケットは Herdr の設定ディレクトリの下にあります。
+デフォルトのソケットは[ランタイム状態ディレクトリ](/ja/docs/configuration/#runtime-state)にあるので、ホームディレクトリを共有するホスト同士でもソケットは共有されません。
 
 名前付きセッションは別のソケットを持ちます:
 
 ```text
-~/.config/herdr/herdr.sock
-~/.config/herdr/sessions/<name>/herdr.sock
+<runtime state>/herdr.sock
+<runtime state>/sessions/<name>/herdr.sock
 ```
 
 解決順:

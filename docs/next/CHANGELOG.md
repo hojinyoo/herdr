@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Changed
+- Sockets, saved sessions and logs move out of the config directory into a runtime state directory, with a hostname segment on Linux. Two machines that share a home directory over NFS no longer fight over one socket and one saved session. Set `XDG_STATE_HOME` to choose the directory. A running server keeps working, and the first cold start takes over the old saved session.
+
 ## [0.9.4] - 2026-10-13
 
 ### Added

@@ -3202,6 +3202,7 @@ mod tests {
         let _guard = crate::config::test_config_env_lock().lock().unwrap();
         let config_home = unique_temp_path("background-session-save");
         std::env::set_var("XDG_CONFIG_HOME", &config_home);
+        std::env::set_var("XDG_STATE_HOME", &config_home);
         std::env::remove_var(crate::session::SESSION_ENV_VAR);
 
         let mut app = test_app();
@@ -3218,6 +3219,7 @@ mod tests {
         assert!(crate::session::data_dir().join("session.json").exists());
 
         std::env::remove_var("XDG_CONFIG_HOME");
+        std::env::remove_var("XDG_STATE_HOME");
         let _ = std::fs::remove_dir_all(config_home);
     }
 
@@ -3267,6 +3269,7 @@ mod tests {
         let _guard = crate::config::test_config_env_lock().lock().unwrap();
         let config_home = unique_temp_path("signaled-pane-session-checkpoint");
         std::env::set_var("XDG_CONFIG_HOME", &config_home);
+        std::env::set_var("XDG_STATE_HOME", &config_home);
         std::env::remove_var(crate::session::SESSION_ENV_VAR);
 
         let mut app = test_app();
@@ -3296,6 +3299,7 @@ mod tests {
         assert_eq!(snapshot.workspaces[0].tabs[0].panes.len(), 2);
 
         std::env::remove_var("XDG_CONFIG_HOME");
+        std::env::remove_var("XDG_STATE_HOME");
         let _ = std::fs::remove_dir_all(config_home);
     }
 
@@ -3304,6 +3308,7 @@ mod tests {
         let _guard = crate::config::test_config_env_lock().lock().unwrap();
         let config_home = unique_temp_path("signaled-pane-autosave");
         std::env::set_var("XDG_CONFIG_HOME", &config_home);
+        std::env::set_var("XDG_STATE_HOME", &config_home);
         std::env::remove_var(crate::session::SESSION_ENV_VAR);
 
         let mut app = test_app();
@@ -3329,6 +3334,7 @@ mod tests {
         assert!(crate::persist::load().is_none());
 
         std::env::remove_var("XDG_CONFIG_HOME");
+        std::env::remove_var("XDG_STATE_HOME");
         let _ = std::fs::remove_dir_all(config_home);
     }
 
@@ -3337,6 +3343,7 @@ mod tests {
         let _guard = crate::config::test_config_env_lock().lock().unwrap();
         let config_home = unique_temp_path("pane-exit-newer-session-state");
         std::env::set_var("XDG_CONFIG_HOME", &config_home);
+        std::env::set_var("XDG_STATE_HOME", &config_home);
         std::env::remove_var(crate::session::SESSION_ENV_VAR);
 
         for another_interrupted_exit in [false, true] {
@@ -3370,6 +3377,7 @@ mod tests {
         }
 
         std::env::remove_var("XDG_CONFIG_HOME");
+        std::env::remove_var("XDG_STATE_HOME");
         let _ = std::fs::remove_dir_all(config_home);
     }
 

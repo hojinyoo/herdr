@@ -2696,6 +2696,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         std::env::set_var("XDG_CONFIG_HOME", &dir);
+        std::env::set_var("XDG_STATE_HOME", &dir);
         dir
     }
 
@@ -3170,6 +3171,7 @@ mod tests {
         drop(work_listener);
         let _ = fs::remove_dir_all(config_home);
         std::env::remove_var("XDG_CONFIG_HOME");
+        std::env::remove_var("XDG_STATE_HOME");
 
         assert_eq!(targets.len(), 2);
         assert_eq!(targets[0].label, crate::session::DEFAULT_SESSION_NAME);
@@ -3199,6 +3201,7 @@ mod tests {
         std::env::remove_var(crate::api::SOCKET_PATH_ENV_VAR);
         std::env::remove_var(crate::session::SESSION_ENV_VAR);
         std::env::remove_var("XDG_CONFIG_HOME");
+        std::env::remove_var("XDG_STATE_HOME");
         crate::session::clear_explicit_session_for_test();
         let _ = fs::remove_dir_all(config_home);
 
@@ -3249,6 +3252,7 @@ mod tests {
         drop(work_client_listener);
         let _ = fs::remove_dir_all(config_home);
         std::env::remove_var("XDG_CONFIG_HOME");
+        std::env::remove_var("XDG_STATE_HOME");
 
         assert!(
             err.contains("work") && err.contains("status API did not respond"),

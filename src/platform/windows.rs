@@ -5456,3 +5456,8 @@ mod tests {
         }
     }
 }
+
+/// `LOCALAPPDATA` never roams with the profile, so it is already per host.
+pub(crate) fn node_state_name() -> Option<String> {
+    None
+}

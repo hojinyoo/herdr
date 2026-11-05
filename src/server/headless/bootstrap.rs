@@ -17,6 +17,7 @@ pub fn run_server() -> io::Result<()> {
     crate::platform::raise_server_nofile_limit();
 
     if handoff_import {
+        crate::session::pin_legacy_socket_for_handoff();
         let socket_path = args
             .get(3)
             .map(PathBuf::from)
@@ -50,6 +51,8 @@ pub fn run_server() -> io::Result<()> {
         }
         Err(err) => return Err(err),
     };
+    // Only after the bind: a live legacy server on this host makes it fail.
+    crate::session::adopt_legacy_session_state();
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()

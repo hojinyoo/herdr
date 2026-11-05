@@ -631,13 +631,13 @@ Event subscriptions keep the connection open after the initial response.
 
 ## Socket paths
 
-The default socket lives under your Herdr config directory.
+The default socket lives in the [runtime state directory](/docs/configuration/#runtime-state), so hosts that share a home directory never share a socket.
 
 Named sessions have separate sockets:
 
 ```text
-~/.config/herdr/herdr.sock
-~/.config/herdr/sessions/<name>/herdr.sock
+<runtime state>/herdr.sock
+<runtime state>/sessions/<name>/herdr.sock
 ```
 
 Resolution order:

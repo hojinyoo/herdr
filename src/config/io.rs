@@ -41,6 +41,46 @@ pub fn state_dir() -> PathBuf {
     platform_state_dir()
 }
 
+/// Root for state a running server writes: sockets, session snapshots, logs.
+///
+/// Config is often shared between hosts, for example a `$HOME` on NFS. Two
+/// servers that share runtime state bind the same socket path and overwrite
+/// each other's session snapshot. An explicit `XDG_STATE_HOME` is the
+/// operator's per-host choice; the platform default may be shared, so it gets
+/// a host segment where the platform names a stable one.
+pub fn runtime_dir() -> PathBuf {
+    if std::env::var_os("XDG_STATE_HOME").is_some() {
+        return state_dir();
+    }
+    match crate::platform::node_state_name() {
+        Some(host) => state_dir().join("hosts").join(node_dir_name(&host)),
+        None => state_dir(),
+    }
+}
+
+/// This host's name as a path segment.
+pub(crate) fn host_label() -> String {
+    node_dir_name(&crate::platform::hostname().unwrap_or_default())
+}
+
+fn node_dir_name(host: &str) -> String {
+    let name: String = host
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if name.is_empty() || name.chars().all(|ch| ch == '.') {
+        "unknown-host".to_string()
+    } else {
+        name
+    }
+}
+
 #[cfg(windows)]
 fn platform_config_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("APPDATA") {
@@ -750,6 +790,50 @@ fn upsert_section_raw(content: &str, section: &str, key: &str, value: &str) -> S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn node_dir_name_keeps_hostnames_and_rejects_path_syntax() {
+        assert_eq!(node_dir_name("node-1.example.com"), "node-1.example.com");
+        assert_eq!(node_dir_name("a/b"), "a_b");
+        assert_eq!(node_dir_name(".."), "unknown-host");
+        assert_eq!(node_dir_name(""), "unknown-host");
+    }
+
+    #[test]
+    fn runtime_dir_uses_explicit_state_home_as_is() {
+        let _guard = crate::config::test_config_env_lock().lock().unwrap();
+        let previous = std::env::var_os("XDG_STATE_HOME");
+        std::env::set_var("XDG_STATE_HOME", "/srv/local-state");
+
+        assert_eq!(
+            runtime_dir(),
+            PathBuf::from("/srv/local-state").join(app_dir_name())
+        );
+
+        match previous {
+            Some(value) => std::env::set_var("XDG_STATE_HOME", value),
+            None => std::env::remove_var("XDG_STATE_HOME"),
+        }
+    }
+
+    #[test]
+    fn runtime_dir_adds_a_host_segment_to_the_platform_default() {
+        let _guard = crate::config::test_config_env_lock().lock().unwrap();
+        let previous = std::env::var_os("XDG_STATE_HOME");
+        std::env::remove_var("XDG_STATE_HOME");
+
+        let expected = match crate::platform::node_state_name() {
+            Some(host) => platform_state_dir()
+                .join("hosts")
+                .join(node_dir_name(&host)),
+            None => platform_state_dir(),
+        };
+        assert_eq!(runtime_dir(), expected);
+
+        if let Some(value) = previous {
+            std::env::set_var("XDG_STATE_HOME", value);
+        }
+    }
 
     #[test]
     fn upsert_top_level_bool_replaces_existing_value() {

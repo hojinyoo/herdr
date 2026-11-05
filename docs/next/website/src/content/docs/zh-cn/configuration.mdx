@@ -595,16 +595,30 @@ switch_ascii_input_source_in_prefix = true
 | `HERDR_LOG` | 设置日志过滤，例如 `HERDR_LOG=herdr=debug`。 |
 | `HERDR_DISABLE_SOUND` | 即使 `[ui.sound] enabled = true` 也禁用声音播放。 |
 
+## 运行时状态
+
+Herdr 把 socket、已保存的会话和日志放在独立于配置的运行时状态目录里。通过 NFS 等方式共享主目录的主机之间，不会共用 socket 或已保存的会话。
+
+```text
+Linux:    ~/.local/state/herdr/hosts/<hostname>/
+macOS:    ~/.local/state/herdr/
+Windows:  %LOCALAPPDATA%\herdr\
+```
+
+命名会话位于其下的 `sessions/<name>/`。要自己指定目录，请设置 `XDG_STATE_HOME`。这时 Herdr 使用 `$XDG_STATE_HOME/herdr/`，不加主机名，所以每台主机要设不同的值。
+
+Herdr 0.9.4 及更早版本把这些状态放在配置目录里。由这些版本启动的服务器在重启前（包括实时移交之后）都会把 socket 留在那里，新的 CLI 仍然能连上。新版服务器第一次冷启动时，会接管旧的 `session.json` 和 `session-history.json`，并留下 `session.json.adopted-by-<hostname>` 作为备份。多台主机共享配置目录时，只有最先启动的主机会接管旧会话。旧日志和快照保留在原处。
+
 ## 日志
 
 日志有助于诊断启动警告、集成状态或 socket API 行为。
 
-常见日志文件：
+常见日志文件（位于[运行时状态目录](#runtime-state)）：
 
 ```text
-~/.config/herdr/herdr.log
-~/.config/herdr/herdr-client.log
-~/.config/herdr/herdr-server.log
+herdr.log
+herdr-client.log
+herdr-server.log
 ```
 
 日志会自动轮转。报告问题时，请附上当前日志和轮转后的同级日志文件。

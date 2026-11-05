@@ -13,8 +13,8 @@ mod write;
 pub use self::{
     io::{
         config_diagnostic_summary, config_dir, config_path, load_live_config,
-        remove_keybinding_config_sections, remove_section_key, state_dir, upsert_section_bool,
-        upsert_section_value,
+        remove_keybinding_config_sections, remove_section_key, runtime_dir, state_dir,
+        upsert_section_bool, upsert_section_value,
     },
     keybinds::{
         format_prefix_combos, normalize_key_combo, terminal_key_matches_combo, ActionKeybinds,
@@ -38,6 +38,7 @@ pub use self::{
     window_title::{WindowTitlePart, WindowTitleTemplate, WindowTitleToken},
 };
 
+pub(crate) use self::io::host_label;
 pub(crate) use self::keybinds::parse_key_combo;
 pub(crate) use self::write::{update_file_at, write_edit, ConfigEdit};
 pub(crate) use self::{
@@ -78,11 +79,6 @@ pub const DEFAULT_MOUSE_SCROLL_LINES: usize = 3;
 pub const DEFAULT_MOBILE_WIDTH_THRESHOLD: u16 = 64;
 pub const DEFAULT_HEADLESS_COLS: u16 = 120;
 pub const DEFAULT_HEADLESS_ROWS: u16 = 40;
-
-#[cfg(test)]
-pub(crate) fn app_dir_name() -> &'static str {
-    io::app_dir_name()
-}
 
 #[cfg(test)]
 pub(crate) fn test_config_env_lock() -> &'static std::sync::Mutex<()> {
