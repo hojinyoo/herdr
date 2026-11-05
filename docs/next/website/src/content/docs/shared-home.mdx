@@ -1,0 +1,104 @@
+---
+title: Shared home directories
+description: Run Herdr on several hosts that share one home directory, for example over NFS, without the hosts overwriting each other's sockets and sessions.
+---
+
+Two hosts that mount the same `$HOME` see the same Herdr files. Config can be shared. A running server's sockets, saved session and logs cannot: two servers writing them bind one socket path and overwrite one `session.json`. Give each host its own runtime state directory before Herdr starts there.
+
+## What is shared and what is per host
+
+| Files | Location | Shared |
+| --- | --- | --- |
+| `config.toml`, `plugins/`, `plugins.json` | Config directory: `$XDG_CONFIG_HOME/herdr`, else `~/.config/herdr` (`config_dir()` in `src/config/io.rs`) | Yes |
+| `herdr.sock`, `herdr-client.sock`, `session.json`, `session-history.json`, `session-snapshots/`, logs, `herdr.lock` | Runtime state directory (`runtime_dir()` in `src/config/io.rs`, used by `data_dir_for()` in `src/session.rs`) | Per host once it has a marker or its own `XDG_STATE_HOME` |
+| Named sessions | `sessions/<name>/` inside the runtime state directory | Same as above |
+| Saved machines, client preferences, agent-detection updates | State directory: `$XDG_STATE_HOME/herdr`, else `~/.local/state/herdr` (`state_dir()` in `src/config/io.rs`) | Yes, unless `XDG_STATE_HOME` differs per host |
+| Worktree checkouts | `[worktrees] directory`, default `~/.herdr/worktrees` | Yes, by design: the shared repository records each checkout by absolute path |
+
+The runtime state directory resolves in this order:
+
+1. `XDG_STATE_HOME` set: `$XDG_STATE_HOME/herdr`, used as is.
+2. A node marker present at `/var/tmp/herdr-node-id` (Linux and macOS): `~/.local/state/herdr/nodes/<id>`.
+3. Neither: the config directory. This is the behavior of earlier versions, and two hosts sharing `$HOME` then share runtime state.
+
+`HERDR_SOCKET_PATH` still overrides the socket path, and `--session <name>` still selects `sessions/<name>`.
+
+## Set up each host
+
+Herdr never makes up a host name, because hosts that share a home can also share a hostname. Pods for one JupyterHub user, for example, may all be called `jupyter-<user>`. Name each host yourself with the node marker.
+
+1. Pick a different name for every host, using `A-Z`, `a-z`, `0-9`, `.`, `_` and `-`.
+2. On each host, write it to the marker. The marker lives in `/var/tmp`, outside the shared home:
+
+   ```sh
+   echo ldev > /var/tmp/herdr-node-id
+   ```
+
+3. Restart the server on that host, or hand it off. Herdr reads the marker once when a process starts.
+
+A new pod or container starts without the marker. Write it again on every new one before Herdr starts there. Without it, that host falls back to the shared config directory.
+
+Herdr does not need any other environment variable for this. Do not put `HERDR_SOCKET_PATH` or `XDG_STATE_HOME` in a file on the shared home, such as a shell profile or a Claude Code project's `.claude/settings.local.json` under `env`. Every host reads that file, so all of them get the same value and share state again. The exception is a node-local path like `XDG_STATE_HOME=/var/tmp/state`, which resolves to different disks on each host. That state is lost when the pod is recreated.
+
+If two hosts still end up in one runtime directory, the second server refuses to start and names the host that holds `herdr.lock`. See [Runtime state](/docs/configuration/#runtime-state) for the lock and the takeover command.
+
+### Moving an existing installation
+
+Servers that were already running before the marker existed keep their sockets in the config directory until they restart, a live handoff included. Newer CLIs still reach them there. The first cold start after the marker exists takes over the old `session.json` and `session-history.json`, and leaves `session.json.adopted-by-<id>` in the config directory as a backup. Only the first host to start takes the old session; the other hosts start empty.
+
+## See the other host
+
+Each host runs its own server, so a TUI on one host shows only that host's panes until you add the other host as a machine. Add it over SSH from either host:
+
+```sh
+herdr machine add ldev --label ldev
+herdr machine add serine --label serine
+```
+
+`ldev` and `serine` are SSH targets from your SSH config. Both hosts must accept key or agent authentication, because saved machines connect with `BatchMode=yes`. Run `machine add` in an interactive terminal the first time: installing Herdr on the other host, or replacing an incompatible server there, asks for confirmation.
+
+How the connection resolves:
+
+- The client runs `ssh <target>` and starts the other host's own `herdr` there. The client never computes a remote socket path. The other host resolves its socket with its own node marker, so write the marker on that host before its server starts.
+- The other host's `herdr` comes from `command -v herdr`, then `~/.local/bin/herdr` and a few package-manager paths. With a shared home, both hosts find the same `~/.local/bin/herdr`, so they run the same binary.
+- The saved-machine list lives in the state directory (`~/.local/state/herdr/client/endpoints.json`, from `catalog_path()` in `src/client/endpoint/catalog.rs`). With a shared home both hosts read the same list, so each host also sees the profile that points at itself. Renaming, disabling or removing a profile changes it on both hosts. Herdr does not detect a profile that points back at the same host. Whether connecting to it works has not been verified; select the other host's profile.
+- `herdr --machine <label> agent list` and other CLI commands use the saved profile directly, without an open TUI.
+
+Versions: attaching checks the endpoint protocol generation and server capabilities, not the version string (`src/remote/attach.rs`, `src/remote/restart_policy.rs`). An exact build match matters in two places:
+
+- A live handoff (`herdr --remote <target> --handoff`) refuses a server whose version differs from the new binary's (`src/server/handoff.rs`).
+- When Herdr installs itself on the other host, it downloads the release asset whose version matches the client. A fork or local build has no such asset, so pass the binary with `HERDR_REMOTE_BINARY=<path>`.
+
+Keeping every host on the same build avoids both cases.
+
+## Verify
+
+Run these on each host after both have restarted.
+
+The marker names this host, and differs between hosts:
+
+```sh
+cat /var/tmp/herdr-node-id
+```
+
+The session directory and socket sit under `nodes/<id>` for this host's id:
+
+```sh
+herdr session list
+```
+
+The `directory` column should read `~/.local/state/herdr/nodes/<id>`, not `~/.config/herdr`.
+
+Each host's lock names that host:
+
+```sh
+cat ~/.local/state/herdr/nodes/*/herdr.lock
+```
+
+Expect one lock per host directory, each with its own `node`.
+
+No live socket remains in the shared config directory. This prints nothing once every old server has restarted:
+
+```sh
+ls ~/.config/herdr/herdr.sock ~/.config/herdr/herdr-client.sock 2>/dev/null
+```
