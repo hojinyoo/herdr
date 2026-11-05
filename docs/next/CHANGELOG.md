@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Changed
+- Hosts that share a home directory over NFS can keep separate sockets, saved sessions and logs. Set `XDG_STATE_HOME` per host, or write a name for the host to `/var/tmp/herdr-node-id`. Without either, Herdr keeps using the config directory. A running server keeps working, and the first cold start in the new directory takes over the old saved session.
+
 ## [0.9.4] - 2026-10-13
 
 ### Added

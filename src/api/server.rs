@@ -1326,43 +1326,44 @@ mod tests {
     }
 
     #[test]
-    fn socket_path_defaults_to_config_dir_even_when_xdg_runtime_dir_is_set() {
+    fn socket_path_defaults_to_runtime_dir_even_when_xdg_runtime_dir_is_set() {
         let _guard = env_lock().lock().unwrap();
         let config_home = unique_test_path("socket-default-config-home");
+        let state_home = unique_test_path("socket-default-state-home");
         let runtime_dir = unique_test_path("socket-default-runtime");
         std::env::remove_var(crate::api::SOCKET_PATH_ENV_VAR);
         std::env::remove_var(crate::session::SESSION_ENV_VAR);
         crate::session::clear_explicit_session_for_test();
         std::env::set_var("XDG_CONFIG_HOME", &config_home);
+        std::env::set_var("XDG_STATE_HOME", &state_home);
         std::env::set_var("XDG_RUNTIME_DIR", &runtime_dir);
 
-        let expected = config_home
-            .join(crate::config::app_dir_name())
-            .join("herdr.sock");
-        assert_eq!(socket_path(), expected);
+        let path = socket_path();
+        assert_eq!(path, crate::config::runtime_dir().join("herdr.sock"));
+        assert!(path.starts_with(&state_home));
 
         std::env::remove_var("XDG_CONFIG_HOME");
+        std::env::remove_var("XDG_STATE_HOME");
         std::env::remove_var("XDG_RUNTIME_DIR");
     }
 
     #[test]
     fn socket_path_uses_named_session_dir() {
         let _guard = env_lock().lock().unwrap();
-        let config_home = unique_test_path("socket-named-config-home");
+        let state_home = unique_test_path("socket-named-state-home");
         std::env::remove_var(crate::api::SOCKET_PATH_ENV_VAR);
         crate::session::clear_explicit_session_for_test();
         std::env::set_var(crate::session::SESSION_ENV_VAR, "work");
-        std::env::set_var("XDG_CONFIG_HOME", &config_home);
+        std::env::set_var("XDG_STATE_HOME", &state_home);
 
-        let expected = config_home
-            .join(crate::config::app_dir_name())
+        let expected = crate::config::runtime_dir()
             .join("sessions")
             .join("work")
             .join("herdr.sock");
         assert_eq!(socket_path(), expected);
 
         std::env::remove_var(crate::session::SESSION_ENV_VAR);
-        std::env::remove_var("XDG_CONFIG_HOME");
+        std::env::remove_var("XDG_STATE_HOME");
     }
 
     #[test]

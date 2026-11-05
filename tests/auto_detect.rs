@@ -108,6 +108,7 @@ fn spawn_server(
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
     support::isolate_herdr_test_process(&mut cmd);
     cmd.arg("server");
+    cmd.env("XDG_STATE_HOME", config_home);
     cmd.env("XDG_CONFIG_HOME", config_home);
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
     cmd.env("HERDR_SOCKET_PATH", api_socket_path);
@@ -153,6 +154,7 @@ fn spawn_herdr_auto(
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
     support::isolate_herdr_test_process(&mut cmd);
     // No subcommand → auto-detect launch.
+    cmd.env("XDG_STATE_HOME", config_home);
     cmd.env("XDG_CONFIG_HOME", config_home);
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
     cmd.env("HERDR_SOCKET_PATH", api_socket_path);
@@ -260,6 +262,7 @@ fn session_attach_without_terminal_leaves_no_session() {
         let mut command = Command::new(env!("CARGO_BIN_EXE_herdr"));
         command
             .args(args)
+            .env("XDG_STATE_HOME", &config_home)
             .env("XDG_CONFIG_HOME", &config_home)
             .env("XDG_RUNTIME_DIR", &runtime_dir)
             .env_remove("HERDR_CONFIG_PATH")
@@ -604,6 +607,7 @@ fn auto_detect_default_socket_path_from_config_dir() {
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
     support::isolate_herdr_test_process(&mut cmd);
     cmd.arg("server");
+    cmd.env("XDG_STATE_HOME", &config_home);
     cmd.env("XDG_CONFIG_HOME", &config_home);
     cmd.env("XDG_RUNTIME_DIR", &runtime_dir);
     cmd.env("SHELL", "/bin/sh");
@@ -712,6 +716,7 @@ fn auto_detect_respects_nested_guard_before_auto_attach() {
         .unwrap_or(0);
 
     let output = Command::new(env!("CARGO_BIN_EXE_herdr"))
+        .env("XDG_STATE_HOME", &config_home)
         .env("XDG_CONFIG_HOME", &config_home)
         .env("XDG_RUNTIME_DIR", &runtime_dir)
         .env("HERDR_SOCKET_PATH", &api_socket)

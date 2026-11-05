@@ -600,16 +600,36 @@ On Windows, support is currently limited to the Korean IME. With an IME for any 
 | `HERDR_LOG` | Set log filtering, for example `HERDR_LOG=herdr=debug`. |
 | `HERDR_DISABLE_SOUND` | Disable sound playback even when `[ui.sound] enabled = true`. |
 
+## Runtime state
+
+Herdr keeps sockets, saved sessions and logs in its runtime state directory:
+
+- With `XDG_STATE_HOME` set: `$XDG_STATE_HOME/herdr/`.
+- Otherwise, on Linux and macOS with a node marker: `~/.local/state/herdr/nodes/<id>/`. The marker is the file `/var/tmp/herdr-node-id`, holding a name for this host.
+- Otherwise: the config directory, as in earlier versions.
+
+Named sessions live in `sessions/<name>/` below it.
+
+Hosts that share a home directory, for example over NFS, must not share runtime state. Give each host its own `XDG_STATE_HOME`, or write a different marker on each host before starting Herdr:
+
+```sh
+echo serine > /var/tmp/herdr-node-id
+```
+
+Herdr reads the marker once at startup and never makes up a name. Without a marker it keeps state in the config directory. A new container or pod starts without the marker, so write it again on each new one. A marker Herdr cannot use prints a warning and leaves state in the config directory.
+
+When a host first gets its own runtime directory, a server still running from the config directory keeps its socket there until it restarts, a live handoff included, and newer CLIs still reach it. The first cold start in the new directory takes over the old `session.json` and `session-history.json` and leaves `session.json.adopted-by-<id>` behind as a backup. When hosts share the config directory, only the first host to start takes the old session. Old logs and snapshots stay where they were.
+
 ## Logs
 
 Logs are useful when diagnosing startup warnings, integration state, or socket API behavior.
 
-Common log files:
+Common log files, in the [runtime state directory](#runtime-state):
 
 ```text
-~/.config/herdr/herdr.log
-~/.config/herdr/herdr-client.log
-~/.config/herdr/herdr-server.log
+herdr.log
+herdr-client.log
+herdr-server.log
 ```
 
 Logs rotate automatically. Include the current log and rotated siblings when reporting issues.

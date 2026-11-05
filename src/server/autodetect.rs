@@ -638,6 +638,7 @@ test "$sid" = "$$"
         let _guard = env_lock().lock().unwrap();
         let dir = unique_test_dir("named-protocol");
         std::env::set_var("XDG_CONFIG_HOME", &dir);
+        std::env::set_var("XDG_STATE_HOME", &dir);
         std::env::set_var(crate::session::SESSION_ENV_VAR, "work");
         std::env::remove_var(crate::api::SOCKET_PATH_ENV_VAR);
         crate::session::clear_explicit_session_for_test();
@@ -676,6 +677,7 @@ test "$sid" = "$$"
             "unexpected error: {message}"
         );
         std::env::remove_var("XDG_CONFIG_HOME");
+        std::env::remove_var("XDG_STATE_HOME");
         std::env::remove_var(crate::session::SESSION_ENV_VAR);
         std::env::remove_var(crate::api::SOCKET_PATH_ENV_VAR);
         crate::session::clear_explicit_session_for_test();

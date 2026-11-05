@@ -490,13 +490,13 @@ Herdr 在本地 socket 上使用换行分隔的 JSON。在 Unix 上,那个 socke
 
 ## Socket 路径
 
-默认 socket 位于你的 Herdr 配置目录下。
+默认 socket 位于[运行时状态目录](/zh-cn/docs/configuration/#runtime-state)。
 
 命名会话有各自独立的 socket:
 
 ```text
-~/.config/herdr/herdr.sock
-~/.config/herdr/sessions/<name>/herdr.sock
+<runtime state>/herdr.sock
+<runtime state>/sessions/<name>/herdr.sock
 ```
 
 解析顺序:
