@@ -3329,6 +3329,11 @@ impl Drop for InputSourceRestore {
     }
 }
 
+/// `LOCALAPPDATA` never roams with the profile, so it is already per host.
+pub(crate) fn node_state_name() -> Option<String> {
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -5455,9 +5460,4 @@ mod tests {
             );
         }
     }
-}
-
-/// `LOCALAPPDATA` never roams with the profile, so it is already per host.
-pub(crate) fn node_state_name() -> Option<String> {
-    None
 }

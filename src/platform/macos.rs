@@ -1201,6 +1201,13 @@ pub fn process_exists(pid: u32) -> bool {
     }
 }
 
+/// macOS hostnames follow the network (DHCP, `.local`), so a host segment
+/// would move runtime state away from a running server. Shared homes set
+/// `XDG_STATE_HOME` per host instead.
+pub(crate) fn node_state_name() -> Option<String> {
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1421,11 +1428,4 @@ printf '%s\n' "$@" > "$HERDR_NOTIFY_ARGS"
         assert!(argv[2].contains("EDITOR:-vi"));
         assert!(argv[2].contains("/tmp/herdr scrollback.txt"));
     }
-}
-
-/// macOS hostnames follow the network (DHCP, `.local`), so a host segment
-/// would move runtime state away from a running server. Shared homes set
-/// `XDG_STATE_HOME` per host instead.
-pub(crate) fn node_state_name() -> Option<String> {
-    None
 }
