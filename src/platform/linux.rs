@@ -1234,6 +1234,14 @@ fn process_session_id(pid: u32) -> Option<i32> {
     fields.get(3)?.parse().ok()
 }
 
+/// The kernel's per-boot id, which differs between machines that share a
+/// hostname.
+pub(crate) fn boot_id() -> Option<String> {
+    let id = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").ok()?;
+    let id = id.trim();
+    (!id.is_empty()).then(|| id.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

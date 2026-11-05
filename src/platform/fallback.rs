@@ -281,3 +281,7 @@ pub fn show_desktop_notification(_title: &str, _body: Option<&str>) -> std::io::
 pub(crate) fn node_marker_path() -> Option<std::path::PathBuf> {
     None
 }
+
+pub(crate) fn boot_id() -> Option<String> {
+    None
+}

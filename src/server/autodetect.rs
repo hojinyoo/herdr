@@ -324,6 +324,8 @@ pub fn auto_detect_launch(saved_federation: bool) -> io::Result<()> {
             }
         } else {
             info!("no server running, spawning server daemon");
+            // The daemon has no terminal, so report another host's lock here.
+            crate::server::host_lock::check(&crate::session::data_dir())?;
             spawn_server_daemon()
                 .and_then(|_| wait_for_server_socket(&socket_path, SERVER_READY_TIMEOUT))
         }

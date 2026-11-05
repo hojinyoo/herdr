@@ -36,6 +36,7 @@ pub fn run_server() -> io::Result<()> {
     let (api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
     let event_hub = api::EventHub::default();
     let server_stop = crate::server::shutdown::ServerStop::default();
+    crate::server::host_lock::check(&crate::session::data_dir())?;
 
     // Start the JSON API socket server.
     let _api_server = match api::start_server_with_stop_control(
@@ -51,6 +52,7 @@ pub fn run_server() -> io::Result<()> {
         }
         Err(err) => return Err(err),
     };
+    let _host_lock = crate::server::host_lock::acquire(&crate::session::data_dir())?;
     // Only after the bind: a live legacy server on this host makes it fail.
     crate::session::adopt_legacy_session_state();
 
@@ -135,6 +137,7 @@ fn take_startup_cwd() -> Option<PathBuf> {
 
 #[cfg(unix)]
 fn run_handoff_import_server(socket_path: &Path, token: &str) -> io::Result<()> {
+    crate::server::host_lock::check(&crate::session::data_dir())?;
     let loaded_config = config::Config::load();
     let mut received = crate::server::handoff::receive(socket_path, token)?;
     crate::server::handoff::log_import_result(received.manifest.panes.len());
@@ -205,6 +208,9 @@ fn run_handoff_import_server(socket_path: &Path, token: &str) -> io::Result<()> 
             warn!(err = %err, "failed to report handoff ownership; continuing as owner");
         }
         info!("handoff import server started");
+        let _host_lock = crate::server::host_lock::acquire(&crate::session::data_dir())
+            .map_err(|err| warn!(%err, "could not record the runtime lock"))
+            .ok();
         print_ready_message(&api::socket_path(), &client_socket_path());
         server.app.run_plugin_startup_hooks();
         server.run().await

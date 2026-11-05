@@ -3334,6 +3334,10 @@ impl Drop for InputSourceRestore {
     }
 }
 
+pub(crate) fn boot_id() -> Option<String> {
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use std::{

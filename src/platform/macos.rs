@@ -1201,6 +1201,10 @@ pub fn process_exists(pid: u32) -> bool {
     }
 }
 
+pub(crate) fn boot_id() -> Option<String> {
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
