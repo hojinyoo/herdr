@@ -225,7 +225,7 @@ pub fn adopt_legacy_session_state() {
     if dir == legacy || dir.join("session.json").exists() {
         return;
     }
-    let host = crate::config::host_label();
+    let host = crate::config::node_label();
     for file in ADOPTED_SESSION_FILES {
         let source = legacy.join(file);
         let claimed = legacy.join(format!("{file}.adopted-by-{host}"));
@@ -1349,7 +1349,7 @@ mod tests {
         );
         assert!(runtime.join("session-history.json").exists());
         assert!(!legacy.join("session.json").exists());
-        let host = crate::config::host_label();
+        let host = crate::config::node_label();
         assert!(legacy
             .join(format!("session.json.adopted-by-{host}"))
             .exists());

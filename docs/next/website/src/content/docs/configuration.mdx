@@ -602,17 +602,23 @@ On Windows, support is currently limited to the Korean IME. With an IME for any 
 
 ## Runtime state
 
-Herdr keeps sockets, saved sessions and logs in a runtime state directory, apart from config. Hosts that share a home directory, for example over NFS, then never share a socket or a saved session.
+Herdr keeps sockets, saved sessions and logs in its runtime state directory:
 
-```text
-Linux:    ~/.local/state/herdr/hosts/<hostname>/
-macOS:    ~/.local/state/herdr/
-Windows:  %LOCALAPPDATA%\herdr\
+- With `XDG_STATE_HOME` set: `$XDG_STATE_HOME/herdr/`.
+- Otherwise, on Linux and macOS with a node marker: `~/.local/state/herdr/nodes/<id>/`. The marker is the file `/var/tmp/herdr-node-id`, holding a name for this host.
+- Otherwise: the config directory, as in earlier versions.
+
+Named sessions live in `sessions/<name>/` below it.
+
+Hosts that share a home directory, for example over NFS, must not share runtime state. Give each host its own `XDG_STATE_HOME`, or write a different marker on each host before starting Herdr:
+
+```sh
+echo serine > /var/tmp/herdr-node-id
 ```
 
-Named sessions live in `sessions/<name>/` below it. Set `XDG_STATE_HOME` to pick the directory yourself. Herdr then uses `$XDG_STATE_HOME/herdr/` with no host segment, so give each host its own value.
+Herdr reads the marker once at startup and never makes up a name. Without a marker it keeps state in the config directory. A new container or pod starts without the marker, so write it again on each new one. A marker Herdr cannot use prints a warning and leaves state in the config directory.
 
-Herdr 0.9.4 and earlier kept this state in the config directory. A server started by those versions keeps its socket there until it restarts, a live handoff included, and newer CLIs still reach it. The first cold start of a newer server takes over the old `session.json` and `session-history.json` and leaves `session.json.adopted-by-<hostname>` behind as a backup. When hosts share the config directory, only the first host to start takes the old session. Old logs and snapshots stay where they were.
+When a host first gets its own runtime directory, a server still running from the config directory keeps its socket there until it restarts, a live handoff included, and newer CLIs still reach it. The first cold start in the new directory takes over the old `session.json` and `session-history.json` and leaves `session.json.adopted-by-<id>` behind as a backup. When hosts share the config directory, only the first host to start takes the old session. Old logs and snapshots stay where they were.
 
 ## Logs
 

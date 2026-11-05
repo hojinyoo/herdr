@@ -16,11 +16,11 @@ use super::{
 
 pub(crate) use super::unix_common::{
     configure_status_command, create_remote_private_dir, create_remote_ssh_config_dir,
-    create_remote_ssh_config_file, hostname, local_datetime, remote_bridge_endpoint_path,
-    remote_private_temp_base, remote_reattach_argument, remote_reattach_program,
-    remote_ssh_config_paths, set_default_plugin_pane_pwd, shutdown_client_stream,
-    status_commands_supported, wait_client_stream_readable, write_client_stream,
-    ClientStreamReader, StatusCommandGuard,
+    create_remote_ssh_config_file, hostname, local_datetime, node_marker_path,
+    remote_bridge_endpoint_path, remote_private_temp_base, remote_reattach_argument,
+    remote_reattach_program, remote_ssh_config_paths, set_default_plugin_pane_pwd,
+    shutdown_client_stream, status_commands_supported, wait_client_stream_readable,
+    write_client_stream, ClientStreamReader, StatusCommandGuard,
 };
 
 #[cfg(test)]
@@ -1232,12 +1232,6 @@ fn process_session_id(pid: u32) -> Option<i32> {
     let rest = stat.get(stat.rfind(')')? + 2..)?;
     let fields: Vec<&str> = rest.split_whitespace().collect();
     fields.get(3)?.parse().ok()
-}
-
-/// Host segment for per-host runtime state. A Linux `$HOME` is often shared
-/// between hosts over NFS, and its hostname is stable across reboots.
-pub(crate) fn node_state_name() -> Option<String> {
-    hostname()
 }
 
 #[cfg(test)]

@@ -462,6 +462,15 @@ fn fits_unix_socket_path(path: &Path) -> bool {
     path.as_os_str().as_bytes().len() <= 103
 }
 
+/// Names this host for per-host runtime state. `$HOME` may be shared over NFS,
+/// and pods sharing it may share a hostname, so the name comes from a file the
+/// operator writes on local disk: `/var/tmp` is outside `$HOME`, writable
+/// without root, and survives reboots on an ordinary host. A new pod starts
+/// without it.
+pub(crate) fn node_marker_path() -> Option<PathBuf> {
+    Some(PathBuf::from("/var/tmp/herdr-node-id"))
+}
+
 /// The machine's node name, as shown by tmux's `#h`.
 pub(crate) fn hostname() -> Option<String> {
     let mut buffer = [0_u8; 256];

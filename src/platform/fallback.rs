@@ -278,6 +278,6 @@ pub fn show_desktop_notification(_title: &str, _body: Option<&str>) -> std::io::
     Ok(false)
 }
 
-pub(crate) fn node_state_name() -> Option<String> {
+pub(crate) fn node_marker_path() -> Option<std::path::PathBuf> {
     None
 }

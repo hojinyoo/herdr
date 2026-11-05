@@ -16,11 +16,11 @@ use super::{
 
 pub(crate) use super::unix_common::{
     configure_status_command, create_remote_private_dir, create_remote_ssh_config_dir,
-    create_remote_ssh_config_file, hostname, local_datetime, remote_bridge_endpoint_path,
-    remote_private_temp_base, remote_reattach_argument, remote_reattach_program,
-    remote_ssh_config_paths, set_default_plugin_pane_pwd, shutdown_client_stream,
-    status_commands_supported, wait_client_stream_readable, write_client_stream,
-    ClientStreamReader, StatusCommandGuard,
+    create_remote_ssh_config_file, hostname, local_datetime, node_marker_path,
+    remote_bridge_endpoint_path, remote_private_temp_base, remote_reattach_argument,
+    remote_reattach_program, remote_ssh_config_paths, set_default_plugin_pane_pwd,
+    shutdown_client_stream, status_commands_supported, wait_client_stream_readable,
+    write_client_stream, ClientStreamReader, StatusCommandGuard,
 };
 
 mod bootstrap;
@@ -1199,13 +1199,6 @@ pub fn process_exists(pid: u32) -> bool {
     } else {
         std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
     }
-}
-
-/// macOS hostnames follow the network (DHCP, `.local`), so a host segment
-/// would move runtime state away from a running server. Shared homes set
-/// `XDG_STATE_HOME` per host instead.
-pub(crate) fn node_state_name() -> Option<String> {
-    None
 }
 
 #[cfg(test)]
