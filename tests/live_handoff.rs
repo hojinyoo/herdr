@@ -80,6 +80,7 @@ fn spawn_server_with_env(
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
     support::isolate_herdr_test_process(&mut cmd);
     cmd.arg("server");
+    cmd.env("XDG_STATE_HOME", config_home);
     cmd.env("XDG_CONFIG_HOME", config_home);
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
     cmd.env("HERDR_SOCKET_PATH", api_socket);
@@ -124,6 +125,7 @@ fn spawn_named_session_server(
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
     support::isolate_herdr_test_process(&mut cmd);
     cmd.arg("server");
+    cmd.env("XDG_STATE_HOME", config_home);
     cmd.env("XDG_CONFIG_HOME", config_home);
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
     cmd.env("HERDR_SESSION", session_name);
@@ -161,7 +163,7 @@ fn spawn_default_session_server(config_home: &Path, runtime_dir: &Path) -> Spawn
     cmd.arg("server");
     cmd.env("XDG_CONFIG_HOME", config_home);
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
-    cmd.env("XDG_STATE_HOME", runtime_dir.join("state"));
+    cmd.env("XDG_STATE_HOME", config_home);
     cmd.env_remove("HERDR_SESSION");
     cmd.env_remove("HERDR_SOCKET_PATH");
     cmd.env_remove("HERDR_CLIENT_SOCKET_PATH");
@@ -205,6 +207,7 @@ fn spawn_server_with_args_and_socket_env(
         cmd.arg(session_name);
     }
     cmd.arg("server");
+    cmd.env("XDG_STATE_HOME", config_home);
     cmd.env("XDG_CONFIG_HOME", config_home);
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
     cmd.env_remove("HERDR_SESSION");

@@ -91,6 +91,7 @@ fn spawn_server(config: &Path, runtime: &Path, api: &Path) -> SpawnedHerdr {
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
     support::isolate_herdr_test_process(&mut cmd);
     cmd.arg("server");
+    cmd.env("XDG_STATE_HOME", config);
     cmd.env("XDG_CONFIG_HOME", config);
     cmd.env("XDG_RUNTIME_DIR", runtime);
     cmd.env("HERDR_SOCKET_PATH", api);
@@ -120,6 +121,7 @@ fn spawn_client(config: &Path, runtime: &Path, api: &Path) -> SpawnedHerdr {
     support::isolate_herdr_test_process(&mut cmd);
     cmd.arg("client");
     cmd.env("HERDR_DISABLE_SOUND", "1");
+    cmd.env("XDG_STATE_HOME", config);
     cmd.env("XDG_CONFIG_HOME", config);
     cmd.env("XDG_RUNTIME_DIR", runtime);
     cmd.env("HERDR_SOCKET_PATH", api);

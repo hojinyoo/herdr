@@ -161,15 +161,106 @@ pub fn data_dir() -> PathBuf {
 }
 
 pub fn data_dir_for(name: Option<&str>) -> PathBuf {
-    let config_dir = crate::config::config_dir();
+    session_dir_in(crate::config::runtime_dir(), name)
+}
+
+/// Where a session lived before runtime state moved out of the config dir.
+fn legacy_data_dir_for(name: Option<&str>) -> PathBuf {
+    session_dir_in(crate::config::config_dir(), name)
+}
+
+fn session_dir_in(root: PathBuf, name: Option<&str>) -> PathBuf {
     match name {
-        Some(name) => config_dir.join("sessions").join(name),
-        None => config_dir,
+        Some(name) => root.join("sessions").join(name),
+        None => root,
+    }
+}
+
+/// A server started by an older herdr keeps its sockets in the config dir
+/// until it is handed off or restarted. Follow a live one so a newer CLI
+/// reaches it, and so a new server fails as already running instead of
+/// binding a second server beside it.
+fn socket_path_for(name: Option<&str>, file: &str) -> PathBuf {
+    let path = data_dir_for(name).join(file);
+    if path.exists() {
+        return path;
+    }
+    let legacy = legacy_data_dir_for(name).join(file);
+    if legacy != path && is_running_at(&legacy) {
+        return legacy;
+    }
+    path
+}
+
+/// Keep a handoff from a legacy-layout server on its config-dir socket.
+///
+/// Imported panes keep the `HERDR_SOCKET_PATH` their old server gave them, so
+/// moving the socket during a handoff would cut every live agent off from the
+/// CLI. Pinning it through the override keeps them reachable; the next cold
+/// start binds in the runtime dir.
+pub fn pin_legacy_socket_for_handoff() {
+    if std::env::var_os(crate::api::SOCKET_PATH_ENV_VAR).is_some() {
+        return;
+    }
+    let name = active_name();
+    let legacy = legacy_data_dir_for(name.as_deref()).join("herdr.sock");
+    // Without a separate runtime dir nothing moves, and pinning would mask a
+    // `HERDR_CLIENT_SOCKET_PATH` override.
+    if legacy != data_dir_for(name.as_deref()).join("herdr.sock")
+        && api_socket_path_for(name.as_deref()) == legacy
+    {
+        tracing::info!(socket = %legacy.display(), "handoff keeps the legacy socket path");
+        std::env::set_var(crate::api::SOCKET_PATH_ENV_VAR, legacy);
+    }
+}
+
+const ADOPTED_SESSION_FILES: [&str; 2] = ["session.json", "session-history.json"];
+
+/// Move the active session's snapshot out of the config dir on first start.
+///
+/// Every host sharing the config dir sees the same legacy snapshot. The claim
+/// is a rename inside the legacy dir, which is atomic on one filesystem, NFS
+/// included, so exactly one host adopts it and the others start empty. The
+/// renamed file stays behind as a backup.
+pub fn adopt_legacy_session_state() {
+    let name = active_name();
+    let dir = data_dir_for(name.as_deref());
+    let legacy = legacy_data_dir_for(name.as_deref());
+    if dir == legacy || dir.join("session.json").exists() {
+        return;
+    }
+    let host = crate::config::node_label();
+    for file in ADOPTED_SESSION_FILES {
+        let source = legacy.join(file);
+        let claimed = legacy.join(format!("{file}.adopted-by-{host}"));
+        match std::fs::rename(&source, &claimed) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(err) => {
+                tracing::warn!(path = %source.display(), %err, "could not claim legacy session state");
+                continue;
+            }
+        }
+        let target = dir.join(file);
+        let copied = std::fs::create_dir_all(&dir).and_then(|()| std::fs::copy(&claimed, &target));
+        match copied {
+            Ok(_) => tracing::info!(
+                from = %claimed.display(),
+                to = %target.display(),
+                "adopted legacy session state"
+            ),
+            Err(err) => tracing::warn!(
+                from = %claimed.display(),
+                to = %target.display(),
+                %err,
+                "could not copy claimed legacy session state; restore it by hand"
+            ),
+        }
     }
 }
 
 pub fn api_socket_path_for(name: Option<&str>) -> PathBuf {
-    data_dir_for(name).join("herdr.sock")
+    socket_path_for(name, "herdr.sock")
 }
 
 pub fn active_api_socket_path() -> PathBuf {
@@ -183,32 +274,34 @@ pub fn active_api_socket_path() -> PathBuf {
 }
 
 pub fn client_socket_path_for(name: Option<&str>) -> PathBuf {
-    data_dir_for(name).join("herdr-client.sock")
+    socket_path_for(name, "herdr-client.sock")
 }
 
 pub fn list_sessions() -> std::io::Result<Vec<SessionInfo>> {
     let mut sessions = vec![session_info(None)];
-    let sessions_dir = crate::config::config_dir().join("sessions");
-    let entries = match std::fs::read_dir(&sessions_dir) {
-        Ok(entries) => entries,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(sessions),
-        Err(err) => return Err(err),
-    };
-
     let mut names = Vec::new();
-    for entry in entries {
-        let entry = entry?;
-        if !entry.file_type()?.is_dir() {
-            continue;
-        }
-        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
-            continue;
+    // Legacy names stay listed until they start once and adopt their state.
+    for root in [crate::config::runtime_dir(), crate::config::config_dir()] {
+        let entries = match std::fs::read_dir(root.join("sessions")) {
+            Ok(entries) => entries,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(err) => return Err(err),
         };
-        if name != DEFAULT_SESSION_NAME && validate_name(&name).is_ok() {
-            names.push(name);
+        for entry in entries {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+            let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+                continue;
+            };
+            if name != DEFAULT_SESSION_NAME && validate_name(&name).is_ok() {
+                names.push(name);
+            }
         }
     }
     names.sort();
+    names.dedup();
     sessions.extend(names.iter().map(|name| session_info(Some(name))));
     Ok(sessions)
 }
@@ -310,25 +403,30 @@ pub fn delete_session(name: &str) -> Result<SessionInfo, String> {
         return Err("deleting the default session is not supported".to_string());
     }
     validate_name(name)?;
-    let Some(dir) = exact_session_dir_for_delete(name)? else {
-        return Ok(session_info(Some(name)));
-    };
-    let socket_path = dir.join("herdr.sock");
-    if is_running_at(&socket_path) {
-        return Err(format!(
-            "session {name} is running; stop it before deleting"
-        ));
+    let mut dirs = Vec::new();
+    for root in [crate::config::runtime_dir(), crate::config::config_dir()] {
+        if let Some(dir) = exact_session_dir_for_delete(&root, name)? {
+            if is_running_at(&dir.join("herdr.sock")) {
+                return Err(format!(
+                    "session {name} is running; stop it before deleting"
+                ));
+            }
+            dirs.push(dir);
+        }
     }
     let info = session_info(Some(name));
-    match std::fs::remove_dir_all(&dir) {
-        Ok(()) => Ok(info),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(info),
-        Err(err) => Err(err.to_string()),
+    for dir in dirs {
+        match std::fs::remove_dir_all(&dir) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err.to_string()),
+        }
     }
+    Ok(info)
 }
 
-fn exact_session_dir_for_delete(name: &str) -> Result<Option<PathBuf>, String> {
-    let sessions_dir = crate::config::config_dir().join("sessions");
+fn exact_session_dir_for_delete(root: &Path, name: &str) -> Result<Option<PathBuf>, String> {
+    let sessions_dir = root.join("sessions");
     let entries = match std::fs::read_dir(&sessions_dir) {
         Ok(entries) => entries,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -522,8 +620,8 @@ mod tests {
         let _guard = env_lock().lock().unwrap();
         let config_home =
             std::env::temp_dir().join(format!("herdr-session-denied-{}", std::process::id()));
-        let previous_config_home = std::env::var_os("XDG_CONFIG_HOME");
-        std::env::set_var("XDG_CONFIG_HOME", &config_home);
+        let previous_config_home = std::env::var_os("XDG_STATE_HOME");
+        std::env::set_var("XDG_STATE_HOME", &config_home);
         let denied_path = api_socket_path_for(Some("denied"));
         let running_path = api_socket_path_for(Some("running"));
         std::fs::create_dir_all(denied_path.parent().unwrap()).unwrap();
@@ -572,8 +670,8 @@ mod tests {
         drop(denied_listener);
         drop(running_listener);
         match previous_config_home {
-            Some(value) => std::env::set_var("XDG_CONFIG_HOME", value),
-            None => std::env::remove_var("XDG_CONFIG_HOME"),
+            Some(value) => std::env::set_var("XDG_STATE_HOME", value),
+            None => std::env::remove_var("XDG_STATE_HOME"),
         }
         std::fs::remove_dir_all(config_home).unwrap();
     }
@@ -675,7 +773,7 @@ mod tests {
     fn stop_session_times_out_when_socket_stays_open_without_response() {
         let _guard = env_lock().lock().unwrap();
         let config_home = PathBuf::from(format!("/tmp/hs-stop-open-{}", std::process::id()));
-        std::env::set_var("XDG_CONFIG_HOME", &config_home);
+        std::env::set_var("XDG_STATE_HOME", &config_home);
         let session_name = "silent";
         let socket_path = api_socket_path_for(Some(session_name));
         std::fs::create_dir_all(socket_path.parent().unwrap()).unwrap();
@@ -716,7 +814,7 @@ mod tests {
         keep_running.store(false, Ordering::Relaxed);
         handle.join().unwrap();
         let _ = std::fs::remove_dir_all(&config_home);
-        std::env::remove_var("XDG_CONFIG_HOME");
+        std::env::remove_var("XDG_STATE_HOME");
     }
 
     #[test]
@@ -853,7 +951,7 @@ mod tests {
         let _guard = env_lock().lock().unwrap();
         let config_home =
             std::env::temp_dir().join(format!("herdr-session-default-{}", std::process::id()));
-        std::env::set_var("XDG_CONFIG_HOME", &config_home);
+        std::env::set_var("XDG_STATE_HOME", &config_home);
         std::env::set_var(SESSION_ENV_VAR, "work");
         clear_explicit_session_for_test();
         std::env::set_var(crate::api::SOCKET_PATH_ENV_VAR, "/tmp/inherited.sock");
@@ -872,11 +970,9 @@ mod tests {
         assert!(explicit_session_requested());
         assert_eq!(
             active_api_socket_path(),
-            config_home
-                .join(crate::config::app_dir_name())
-                .join("herdr.sock")
+            crate::config::runtime_dir().join("herdr.sock")
         );
-        std::env::remove_var("XDG_CONFIG_HOME");
+        std::env::remove_var("XDG_STATE_HOME");
         std::env::remove_var(SESSION_ENV_VAR);
         clear_explicit_session_for_test();
         std::env::remove_var(crate::api::SOCKET_PATH_ENV_VAR);
@@ -906,7 +1002,7 @@ mod tests {
         let _guard = env_lock().lock().unwrap();
         let config_home =
             std::env::temp_dir().join(format!("herdr-env-session-default-{}", std::process::id()));
-        std::env::set_var("XDG_CONFIG_HOME", &config_home);
+        std::env::set_var("XDG_STATE_HOME", &config_home);
         std::env::remove_var(crate::api::SOCKET_PATH_ENV_VAR);
         std::env::set_var(SESSION_ENV_VAR, DEFAULT_SESSION_NAME);
         EXPLICIT_SESSION_REQUESTED.store(true, Ordering::Relaxed);
@@ -923,11 +1019,9 @@ mod tests {
         assert!(!explicit_session_requested());
         assert_eq!(
             active_api_socket_path(),
-            config_home
-                .join(crate::config::app_dir_name())
-                .join("herdr.sock")
+            crate::config::runtime_dir().join("herdr.sock")
         );
-        std::env::remove_var("XDG_CONFIG_HOME");
+        std::env::remove_var("XDG_STATE_HOME");
         std::env::remove_var(SESSION_ENV_VAR);
         std::env::remove_var(crate::api::SOCKET_PATH_ENV_VAR);
         clear_explicit_session_for_test();
@@ -1002,7 +1096,7 @@ mod tests {
         let _guard = env_lock().lock().unwrap();
         let config_home =
             std::env::temp_dir().join(format!("herdr-session-precedence-{}", std::process::id()));
-        std::env::set_var("XDG_CONFIG_HOME", &config_home);
+        std::env::set_var("XDG_STATE_HOME", &config_home);
         std::env::set_var(SESSION_ENV_VAR, "work");
         EXPLICIT_SESSION_REQUESTED.store(true, Ordering::Relaxed);
         std::env::set_var(crate::api::SOCKET_PATH_ENV_VAR, "/tmp/inherited.sock");
@@ -1011,13 +1105,12 @@ mod tests {
 
         assert_eq!(
             path,
-            config_home
-                .join(crate::config::app_dir_name())
+            crate::config::runtime_dir()
                 .join("sessions")
                 .join("work")
                 .join("herdr.sock")
         );
-        std::env::remove_var("XDG_CONFIG_HOME");
+        std::env::remove_var("XDG_STATE_HOME");
         std::env::remove_var(SESSION_ENV_VAR);
         clear_explicit_session_for_test();
         std::env::remove_var(crate::api::SOCKET_PATH_ENV_VAR);
@@ -1069,7 +1162,7 @@ mod tests {
     fn stop_session_fails_when_socket_remains_reachable_after_timeout() {
         let _guard = env_lock().lock().unwrap();
         let config_home = PathBuf::from(format!("/tmp/hs-stop-{}", std::process::id()));
-        std::env::set_var("XDG_CONFIG_HOME", &config_home);
+        std::env::set_var("XDG_STATE_HOME", &config_home);
         let session_name = "slow";
         let socket_path = api_socket_path_for(Some(session_name));
         std::fs::create_dir_all(socket_path.parent().unwrap()).unwrap();
@@ -1113,7 +1206,7 @@ mod tests {
         keep_running.store(false, Ordering::Relaxed);
         handle.join().unwrap();
         let _ = std::fs::remove_dir_all(&config_home);
-        std::env::remove_var("XDG_CONFIG_HOME");
+        std::env::remove_var("XDG_STATE_HOME");
     }
 
     #[test]
@@ -1138,16 +1231,17 @@ mod tests {
     #[test]
     fn list_sessions_skips_reserved_default_directory() {
         let _guard = env_lock().lock().unwrap();
-        let config_home =
-            std::env::temp_dir().join(format!("herdr-session-list-{}", std::process::id()));
-        let sessions_dir = config_home
-            .join(crate::config::app_dir_name())
-            .join("sessions");
-        std::fs::create_dir_all(sessions_dir.join(DEFAULT_SESSION_NAME)).unwrap();
-        std::fs::create_dir_all(sessions_dir.join("work")).unwrap();
-        std::env::set_var("XDG_CONFIG_HOME", &config_home);
+        let root = std::env::temp_dir().join(format!("herdr-session-list-{}", std::process::id()));
+        std::env::set_var("XDG_STATE_HOME", root.join("state"));
+        std::env::set_var("XDG_CONFIG_HOME", root.join("config"));
         std::env::remove_var(SESSION_ENV_VAR);
         clear_explicit_session_for_test();
+        let sessions_dir = crate::config::runtime_dir().join("sessions");
+        std::fs::create_dir_all(sessions_dir.join(DEFAULT_SESSION_NAME)).unwrap();
+        std::fs::create_dir_all(sessions_dir.join("work")).unwrap();
+        let legacy_sessions_dir = crate::config::config_dir().join("sessions");
+        std::fs::create_dir_all(legacy_sessions_dir.join("legacy")).unwrap();
+        std::fs::create_dir_all(legacy_sessions_dir.join("work")).unwrap();
 
         let sessions = list_sessions().unwrap();
         let names: Vec<_> = sessions
@@ -1155,8 +1249,171 @@ mod tests {
             .map(|session| session.name.as_str())
             .collect();
 
-        assert_eq!(names, vec![DEFAULT_SESSION_NAME, "work"]);
-        std::fs::remove_dir_all(&config_home).unwrap();
+        assert_eq!(names, vec![DEFAULT_SESSION_NAME, "legacy", "work"]);
+        std::fs::remove_dir_all(&root).unwrap();
+        std::env::remove_var("XDG_STATE_HOME");
         std::env::remove_var("XDG_CONFIG_HOME");
+    }
+
+    fn set_split_roots(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("herdr-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::env::set_var("XDG_STATE_HOME", root.join("state"));
+        std::env::set_var("XDG_CONFIG_HOME", root.join("config"));
+        std::env::remove_var(SESSION_ENV_VAR);
+        std::env::remove_var(crate::api::SOCKET_PATH_ENV_VAR);
+        clear_explicit_session_for_test();
+        root
+    }
+
+    fn clear_split_roots(root: &Path) {
+        let _ = std::fs::remove_dir_all(root);
+        std::env::remove_var("XDG_STATE_HOME");
+        std::env::remove_var("XDG_CONFIG_HOME");
+    }
+
+    #[test]
+    fn session_data_lives_under_runtime_dir_not_config_dir() {
+        let _guard = env_lock().lock().unwrap();
+        let root = set_split_roots("runtime-root");
+
+        assert!(data_dir_for(None).starts_with(root.join("state")));
+        assert!(data_dir_for(Some("work")).starts_with(root.join("state")));
+        assert_eq!(
+            api_socket_path_for(Some("work")),
+            crate::config::runtime_dir()
+                .join("sessions")
+                .join("work")
+                .join("herdr.sock")
+        );
+        clear_split_roots(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn socket_path_follows_a_live_legacy_server_only_while_it_listens() {
+        let _guard = env_lock().lock().unwrap();
+        let root = set_split_roots("legacy-live");
+        let legacy = crate::config::config_dir().join("herdr.sock");
+        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        let listener = std::os::unix::net::UnixListener::bind(&legacy).unwrap();
+
+        assert_eq!(api_socket_path_for(None), legacy);
+
+        drop(listener);
+        assert_eq!(
+            api_socket_path_for(None),
+            crate::config::runtime_dir().join("herdr.sock")
+        );
+        clear_split_roots(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn handoff_from_a_legacy_server_keeps_its_socket_path() {
+        let _guard = env_lock().lock().unwrap();
+        let root = set_split_roots("handoff-pin");
+
+        pin_legacy_socket_for_handoff();
+        assert!(std::env::var_os(crate::api::SOCKET_PATH_ENV_VAR).is_none());
+
+        let legacy = crate::config::config_dir().join("herdr.sock");
+        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        let listener = std::os::unix::net::UnixListener::bind(&legacy).unwrap();
+        pin_legacy_socket_for_handoff();
+        drop(listener);
+
+        assert_eq!(
+            std::env::var_os(crate::api::SOCKET_PATH_ENV_VAR),
+            Some(legacy.into_os_string())
+        );
+        assert_eq!(
+            crate::server::socket_paths::client_socket_path(),
+            crate::config::config_dir().join("herdr-client.sock")
+        );
+        std::env::remove_var(crate::api::SOCKET_PATH_ENV_VAR);
+        clear_split_roots(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn handoff_without_a_separate_runtime_dir_pins_nothing() {
+        let _guard = env_lock().lock().unwrap();
+        let root = set_split_roots("handoff-no-pin");
+        std::env::set_var("XDG_STATE_HOME", root.join("config"));
+        let socket = crate::config::config_dir().join("herdr.sock");
+        assert_eq!(socket, data_dir_for(None).join("herdr.sock"));
+        std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+
+        pin_legacy_socket_for_handoff();
+        drop(listener);
+
+        assert!(std::env::var_os(crate::api::SOCKET_PATH_ENV_VAR).is_none());
+        clear_split_roots(&root);
+    }
+
+    #[test]
+    fn adopt_legacy_session_state_claims_the_snapshot_for_one_host() {
+        let _guard = env_lock().lock().unwrap();
+        let root = set_split_roots("adopt");
+        let legacy = crate::config::config_dir();
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join("session.json"), b"{\"legacy\":true}").unwrap();
+        std::fs::write(legacy.join("session-history.json"), b"[]").unwrap();
+
+        adopt_legacy_session_state();
+
+        let runtime = crate::config::runtime_dir();
+        assert_eq!(
+            std::fs::read(runtime.join("session.json")).unwrap(),
+            b"{\"legacy\":true}"
+        );
+        assert!(runtime.join("session-history.json").exists());
+        assert!(!legacy.join("session.json").exists());
+        let host = crate::config::node_label();
+        assert!(legacy
+            .join(format!("session.json.adopted-by-{host}"))
+            .exists());
+
+        // A second host sharing the config dir finds nothing left to adopt.
+        std::env::set_var("XDG_STATE_HOME", root.join("other-host-state"));
+        adopt_legacy_session_state();
+        assert!(!crate::config::runtime_dir().join("session.json").exists());
+        clear_split_roots(&root);
+    }
+
+    #[test]
+    fn adopt_legacy_session_state_keeps_existing_runtime_snapshot() {
+        let _guard = env_lock().lock().unwrap();
+        let root = set_split_roots("adopt-existing");
+        let legacy = crate::config::config_dir();
+        let runtime = crate::config::runtime_dir();
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::create_dir_all(&runtime).unwrap();
+        std::fs::write(legacy.join("session.json"), b"legacy").unwrap();
+        std::fs::write(runtime.join("session.json"), b"current").unwrap();
+
+        adopt_legacy_session_state();
+
+        assert_eq!(
+            std::fs::read(runtime.join("session.json")).unwrap(),
+            b"current"
+        );
+        assert!(legacy.join("session.json").exists());
+        clear_split_roots(&root);
+    }
+
+    #[test]
+    fn delete_session_removes_legacy_session_dir() {
+        let _guard = env_lock().lock().unwrap();
+        let root = set_split_roots("delete-legacy");
+        let legacy_dir = crate::config::config_dir().join("sessions").join("old");
+        std::fs::create_dir_all(&legacy_dir).unwrap();
+
+        delete_session("old").unwrap();
+
+        assert!(!legacy_dir.exists());
+        clear_split_roots(&root);
     }
 }

@@ -1,0 +1,104 @@
+---
+title: 共享主目录
+description: 在通过 NFS 等方式共享同一个主目录的多台主机上运行 Herdr，避免主机之间互相覆盖 socket 和会话。
+---
+
+挂载同一个 `$HOME` 的两台主机看到的是同一套 Herdr 文件。配置可以共享。运行中服务器的 socket、已保存的会话和日志不能共享：两台服务器同时写入时，会绑定同一个 socket 路径，并覆盖同一个 `session.json`。在主机上启动 Herdr 之前，请给每台主机分配各自的运行时状态目录。
+
+## 哪些共享，哪些按主机区分
+
+| 文件 | 位置 | 是否共享 |
+| --- | --- | --- |
+| `config.toml`、`plugins/`、`plugins.json` | 配置目录：`$XDG_CONFIG_HOME/herdr`，否则为 `~/.config/herdr`（`src/config/io.rs` 中的 `config_dir()`） | 是 |
+| `herdr.sock`、`herdr-client.sock`、`session.json`、`session-history.json`、`session-snapshots/`、日志、`herdr.lock` | 运行时状态目录（`src/config/io.rs` 中的 `runtime_dir()`，由 `src/session.rs` 中的 `data_dir_for()` 使用） | 有标记或有自己的 `XDG_STATE_HOME` 时按主机区分 |
+| 命名会话 | 运行时状态目录中的 `sessions/<name>/` | 同上 |
+| 已保存的机器、客户端偏好、智能体检测更新 | 状态目录：`$XDG_STATE_HOME/herdr`，否则为 `~/.local/state/herdr`（`src/config/io.rs` 中的 `state_dir()`） | 是，除非各主机的 `XDG_STATE_HOME` 不同 |
+| 工作树检出 | `[worktrees] directory`，默认 `~/.herdr/worktrees` | 是，这是有意为之：共享仓库按绝对路径记录每个检出 |
+
+运行时状态目录按以下顺序确定：
+
+1. 设置了 `XDG_STATE_HOME`：直接使用 `$XDG_STATE_HOME/herdr`。
+2. `/var/tmp/herdr-node-id` 存在节点标记（Linux 和 macOS）：`~/.local/state/herdr/nodes/<id>`。
+3. 都没有：配置目录。这是旧版本的行为，此时共享 `$HOME` 的两台主机也会共享运行时状态。
+
+`HERDR_SOCKET_PATH` 仍然会覆盖 socket 路径，`--session <name>` 仍然选择 `sessions/<name>`。
+
+## 设置每台主机
+
+Herdr 不会自己编造主机名，因为共享主目录的主机也可能共用同一个主机名。例如，同一个 JupyterHub 用户的 pod 可能都叫 `jupyter-<user>`。请用节点标记自己给每台主机命名。
+
+1. 给每台主机选一个不同的名字，可用字符为 `A-Z`、`a-z`、`0-9`、`.`、`_` 和 `-`。
+2. 在每台主机上把名字写入标记。标记位于共享主目录之外的 `/var/tmp`：
+
+   ```sh
+   echo ldev > /var/tmp/herdr-node-id
+   ```
+
+3. 在这台主机上重启服务器，或者进行移交。Herdr 只在进程启动时读取一次标记。
+
+新的 pod 或容器启动时没有标记。每次新建后，都要在启动 Herdr 之前重新写入。没有标记时，这台主机会回退到共享的配置目录。
+
+Herdr 不需要为此设置其他环境变量。不要把 `HERDR_SOCKET_PATH` 或 `XDG_STATE_HOME` 写进共享主目录上的文件，例如 shell 配置文件，或 Claude Code 项目 `.claude/settings.local.json` 中的 `env`。每台主机都会读取这个文件，于是所有主机得到相同的值，又会共享状态。例外是 `XDG_STATE_HOME=/var/tmp/state` 这样的节点本地路径，它在每台主机上指向不同的磁盘。不过 pod 重建后，这些状态会丢失。
+
+如果两台主机仍然用到了同一个运行时目录，第二台服务器会拒绝启动，并报出持有 `herdr.lock` 的主机名。锁和接管命令请参阅[运行时状态](/zh-cn/docs/configuration/#runtime-state)。
+
+### 迁移现有安装
+
+在标记存在之前就已运行的服务器，在重启前（包括实时移交）都会把 socket 留在配置目录，新的 CLI 仍然能在那里连上它们。标记存在后的第一次冷启动会接管旧的 `session.json` 和 `session-history.json`，并在配置目录留下 `session.json.adopted-by-<id>` 作为备份。只有最先启动的主机会接管旧会话，其他主机以空状态启动。
+
+## 查看另一台主机
+
+每台主机运行自己的服务器，所以在把另一台主机添加为机器之前，一台主机上的 TUI 只显示本机的窗格。可以在任一台主机上通过 SSH 添加：
+
+```sh
+herdr machine add ldev --label ldev
+herdr machine add serine --label serine
+```
+
+`ldev` 和 `serine` 是 SSH 配置中的 SSH 目标。已保存的机器以 `BatchMode=yes` 连接，所以两台主机都必须接受密钥或 agent 认证。第一次请在交互式终端中运行 `machine add`：在另一台主机上安装 Herdr，或替换那里不兼容的服务器时，都会请求确认。
+
+连接的解析方式：
+
+- 客户端运行 `ssh <target>`，在另一台主机上启动那台主机自己的 `herdr`。客户端从不计算远程 socket 路径。另一台主机用自己的节点标记解析 socket，所以要在那台主机的服务器启动前写入标记。
+- 另一台主机的 `herdr` 依次从 `command -v herdr`、`~/.local/bin/herdr` 以及几个包管理器路径中查找。共享主目录时，两台主机找到的是同一个 `~/.local/bin/herdr`，因此运行同一个二进制文件。
+- 已保存的机器列表位于状态目录（`~/.local/state/herdr/client/endpoints.json`，来自 `src/client/endpoint/catalog.rs` 中的 `catalog_path()`）。共享主目录时两台主机读取同一个列表，所以每台主机也会看到指向自己的配置。重命名、禁用或删除配置会同时影响两台主机。Herdr 不会检测指回同一台主机的配置。连接到它能否正常工作尚未验证；请选择另一台主机的配置。
+- `herdr --machine <label> agent list` 等 CLI 命令直接使用已保存的配置，不需要打开 TUI。
+
+版本：附加时检查的是端点协议代际和服务器能力，而不是版本字符串（`src/remote/attach.rs`、`src/remote/restart_policy.rs`）。构建必须完全一致的情况有两处：
+
+- 实时移交（`herdr --remote <target> --handoff`）会拒绝版本与新二进制文件不同的服务器（`src/server/handoff.rs`）。
+- Herdr 在另一台主机上安装自己时，会下载与客户端版本一致的发布资源。fork 或本地构建没有这样的资源，所以请用 `HERDR_REMOTE_BINARY=<path>` 传入二进制文件。
+
+让所有主机使用同一个构建，就能避免这两种情况。
+
+## 验证
+
+两台主机都重启后，在每台主机上运行以下命令。
+
+标记是本机的名字，并且各主机不同：
+
+```sh
+cat /var/tmp/herdr-node-id
+```
+
+会话目录和 socket 位于本机 ID 对应的 `nodes/<id>` 下：
+
+```sh
+herdr session list
+```
+
+`directory` 列应显示 `~/.local/state/herdr/nodes/<id>`，而不是 `~/.config/herdr`。
+
+每台主机的锁写的是本机的名字：
+
+```sh
+cat ~/.local/state/herdr/nodes/*/herdr.lock
+```
+
+每个主机目录应有一个锁，各自带有自己的 `node`。
+
+共享的配置目录中不再有活动的 socket。所有旧服务器都重启后，这条命令不会输出任何内容：
+
+```sh
+ls ~/.config/herdr/herdr.sock ~/.config/herdr/herdr-client.sock 2>/dev/null
+```

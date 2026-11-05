@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use tracing::warn;
 
@@ -39,6 +40,102 @@ pub fn state_dir() -> PathBuf {
         return PathBuf::from(dir).join(app_dir_name());
     }
     platform_state_dir()
+}
+
+/// Root for state a running server writes: sockets, session snapshots, logs.
+///
+/// Config is often shared between hosts, for example a `$HOME` on NFS, and two
+/// servers sharing runtime state bind one socket and overwrite one session
+/// snapshot. A hostname is not a proven key for such hosts: pods that share a
+/// home can share a hostname too, for example JupyterHub's `jupyter-<user>`.
+/// So a host opts in by naming itself:
+/// - `XDG_STATE_HOME` set: the operator's per-host directory, used as is.
+/// - a node marker outside `$HOME`: `<platform state dir>/nodes/<id>`.
+/// - neither: the config dir, as before. Herdr never makes up a node name.
+pub fn runtime_dir() -> PathBuf {
+    runtime_dir_from(std::env::var_os("XDG_STATE_HOME").is_some(), node_id())
+}
+
+fn runtime_dir_from(explicit_state_home: bool, node_id: Option<&str>) -> PathBuf {
+    if explicit_state_home {
+        return state_dir();
+    }
+    match node_id {
+        Some(id) => platform_state_dir().join("nodes").join(id),
+        None => config_dir(),
+    }
+}
+
+/// The name in this host's node marker. Read once per process, so a marker
+/// written while a server runs never moves that server's state.
+pub(crate) fn node_id() -> Option<&'static str> {
+    static NODE_ID: OnceLock<Option<String>> = OnceLock::new();
+    NODE_ID
+        .get_or_init(|| read_node_id(&crate::platform::node_marker_path()?))
+        .as_deref()
+}
+
+fn read_node_id(path: &Path) -> Option<String> {
+    let content = match std::fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(err) => {
+            report_bad_node_marker(path, &err.to_string());
+            return None;
+        }
+    };
+    let id = content.trim();
+    if valid_node_id(id) {
+        Some(id.to_string())
+    } else {
+        report_bad_node_marker(
+            path,
+            "expected 1-64 characters from A-Z a-z 0-9 . _ - that do not start with .",
+        );
+        None
+    }
+}
+
+// A bad marker leaves this host on the shared config dir, so say so loudly.
+fn report_bad_node_marker(path: &Path, reason: &str) {
+    let message = format!(
+        "herdr: ignoring node marker {}: {reason}; runtime state stays in the config dir",
+        path.display()
+    );
+    warn!("{message}");
+    eprintln!("{message}");
+}
+
+fn valid_node_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && !id.starts_with('.')
+        && id
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+}
+
+/// This host's name for file names: the node id, else the hostname.
+pub(crate) fn node_label() -> String {
+    if let Some(id) = node_id() {
+        return id.to_string();
+    }
+    let host: String = crate::platform::hostname()
+        .unwrap_or_default()
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if host.is_empty() {
+        "unknown-host".to_string()
+    } else {
+        host
+    }
 }
 
 #[cfg(windows)]
@@ -750,6 +847,57 @@ fn upsert_section_raw(content: &str, section: &str, key: &str, value: &str) -> S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn valid_node_id_rejects_path_syntax() {
+        assert!(valid_node_id("ldev"));
+        assert!(valid_node_id("serine-2.pod_1"));
+        assert!(!valid_node_id(""));
+        assert!(!valid_node_id(".."));
+        assert!(!valid_node_id(".hidden"));
+        assert!(!valid_node_id("a/b"));
+        assert!(!valid_node_id("two words"));
+        assert!(!valid_node_id(&"x".repeat(65)));
+    }
+
+    #[test]
+    fn read_node_id_trims_and_refuses_invalid_or_missing_markers() {
+        let dir = std::env::temp_dir().join(format!("herdr-node-marker-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let marker = dir.join("node-id");
+
+        assert_eq!(read_node_id(&marker), None);
+        std::fs::write(&marker, "serine\n").unwrap();
+        assert_eq!(read_node_id(&marker).as_deref(), Some("serine"));
+        std::fs::write(&marker, "../ldev\n").unwrap();
+        assert_eq!(read_node_id(&marker), None);
+        std::fs::write(&marker, "").unwrap();
+        assert_eq!(read_node_id(&marker), None);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn runtime_dir_prefers_state_home_then_node_marker_then_config_dir() {
+        let _guard = crate::config::test_config_env_lock().lock().unwrap();
+        let previous = std::env::var_os("XDG_STATE_HOME");
+        std::env::set_var("XDG_STATE_HOME", "/srv/local-state");
+        assert_eq!(
+            runtime_dir_from(true, Some("serine")),
+            PathBuf::from("/srv/local-state").join(app_dir_name())
+        );
+        std::env::remove_var("XDG_STATE_HOME");
+
+        assert_eq!(
+            runtime_dir_from(false, Some("serine")),
+            platform_state_dir().join("nodes").join("serine")
+        );
+        assert_eq!(runtime_dir_from(false, None), config_dir());
+
+        if let Some(value) = previous {
+            std::env::set_var("XDG_STATE_HOME", value);
+        }
+    }
 
     #[test]
     fn upsert_top_level_bool_replaces_existing_value() {

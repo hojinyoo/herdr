@@ -123,6 +123,7 @@ fn spawn_server_with_config(
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
     support::isolate_herdr_test_process(&mut cmd);
     cmd.arg("server");
+    cmd.env("XDG_STATE_HOME", config_home);
     cmd.env("XDG_CONFIG_HOME", config_home);
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
     cmd.env("HERDR_SOCKET_PATH", api_socket_path);

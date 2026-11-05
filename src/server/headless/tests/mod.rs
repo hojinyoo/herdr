@@ -4911,7 +4911,7 @@ fn windows_shutdown_probe_preserves_panes_and_agent_sessions() {
         })
     }
     let _guard = crate::config::test_config_env_lock().lock().unwrap();
-    struct RestoreEnv([(&'static str, Option<std::ffi::OsString>); 2]);
+    struct RestoreEnv([(&'static str, Option<std::ffi::OsString>); 3]);
     impl Drop for RestoreEnv {
         fn drop(&mut self) {
             for (key, previous) in &self.0 {
@@ -4923,8 +4923,12 @@ fn windows_shutdown_probe_preserves_panes_and_agent_sessions() {
         }
     }
     let _env = RestoreEnv(
-        ["XDG_CONFIG_HOME", crate::session::SESSION_ENV_VAR]
-            .map(|key| (key, std::env::var_os(key))),
+        [
+            "XDG_CONFIG_HOME",
+            "XDG_STATE_HOME",
+            crate::session::SESSION_ENV_VAR,
+        ]
+        .map(|key| (key, std::env::var_os(key))),
     );
     let config_home = std::env::temp_dir().join(format!(
         "herdr-shutdown-{}-{}",
@@ -4935,6 +4939,7 @@ fn windows_shutdown_probe_preserves_panes_and_agent_sessions() {
             .as_nanos(),
     ));
     std::env::set_var("XDG_CONFIG_HOME", &config_home);
+    std::env::set_var("XDG_STATE_HOME", &config_home);
     std::env::remove_var(crate::session::SESSION_ENV_VAR);
 
     for entry in [

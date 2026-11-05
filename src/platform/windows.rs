@@ -970,6 +970,11 @@ pub(crate) fn should_query_host_terminal_palette() -> bool {
 }
 
 /// The machine's node name, as shown by tmux's `#h`.
+/// Windows keeps runtime state where it always has; no node marker.
+pub(crate) fn node_marker_path() -> Option<std::path::PathBuf> {
+    None
+}
+
 pub(crate) fn hostname() -> Option<String> {
     std::env::var("COMPUTERNAME")
         .ok()
@@ -3327,6 +3332,10 @@ impl Drop for InputSourceRestore {
             }
         }
     }
+}
+
+pub(crate) fn boot_id() -> Option<String> {
+    None
 }
 
 #[cfg(test)]
